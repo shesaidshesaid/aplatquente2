@@ -1,0 +1,82 @@
+apn1 20 
+
+1/2019/2023
+
+
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[1]
+
+<div _ngcontent-ng-c3786019781="" class="row ng-star-inserted" id="questao_379"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 001 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta pergunta-par col-md-7">A execução deste trabalho implica em alteração nas condições operacionais, de forma não prevista em análise de risco e procedimento pré-estabelecido, que possa acarretar parada de sistemas de segurança ou provocar emergência?</div><div _ngcontent-ng-c3786019781="" class="form-group col-md-4"><div _ngcontent-ng-c3786019781="" class="resposta simnao ng-star-inserted"><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_65_379_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_65_379_0_label" for="APN1_3795_65_379_0">Sim</label></span><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_65_379_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_65_379_1_label" for="APN1_3795_65_379_1">Não</label></span><!----></div><!----><!----><!----></div></div>
+
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[20]
+
+<div _ngcontent-ng-c3786019781="" class="row ng-star-inserted" id="questao_402"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 020 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta col-md-7">O trabalho envolve manutenção em sistema de combate a incêndio provocando sua indisponibilidade nas áreas protegidas?</div><div _ngcontent-ng-c3786019781="" class="form-group col-md-4"><div _ngcontent-ng-c3786019781="" class="resposta simnao ng-star-inserted"><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_84_402_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_84_402_0_label" for="APN1_3795_84_402_0">Sim</label></span><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_84_402_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_84_402_1_label" for="APN1_3795_84_402_1">Não</label></span><!----></div><!----><!----><!----></div></div>
+
+
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[3]/div
+
+<div class="app-modal-footer"><app-botoes-etapa><button type="button" class="btn btn-primary ng-star-inserted" style="float: left;">Cadastrar Precedências</button><!----><button type="button" class="btn btn-primary ng-star-inserted" style="float: left;">Visualizar Precedências</button><!----><!----><!----><!----><button type="button" class="btn btn-primary">Confirmar</button><button type="button" class="btn btn-default">Fechar</button></app-botoes-etapa></div>
+
+Análise Preliminar de Nível 1
+001A execução deste trabalho implica em alteração nas condições operacionais, de forma não prevista em análise de risco e procedimento pré-estabelecido, que possa acarretar parada de sistemas de segurança ou provocar emergência?
+SimNão
+002Durante a execução deste trabalho pode haver contato com temperatura extrema em equipamentos ou sistemas sem proteção térmica?
+SimNão
+003Durante a execução deste trabalho haverá intervenção em circuito de controle ou de proteção de painéis elétricos essenciais?
+SimNão
+004Durante a execução deste trabalho haverá intervenção em circuito pertencente a sistema de no-break ou de corrente contínua crítico que causará a indisponibilidade do sistema?
+SimNão
+005A execução deste trabalho pode interferir na segurança operacional de outras áreas de operação?
+SimNão
+006Este trabalho será executado no interior de espaços confinados?
+SimNão
+007Este trabalho será executado em altura acima de 2m e com risco de queda, conforme NR-35, de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+008Este trabalho será executado sobre o mar?
+SimNão
+009Este trabalho será executado em local com risco de presença de H2S, de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+010O trabalho envolverá chama aberta (solda, corte, esmerilhamento)?
+SimNão
+011Os equipamentos/ferramentas utilizados na execução deste trabalho e/ou a realização do mesmo oferecem riscos de gerar centelhas, faíscas ou eletricidade estática quando forem utilizados em área classificada, de forma que sejam necessárias medidas de segurança adicionais ao uso de detector de gás portátil que não estejam previstas em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: 1) Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é "NÃO".
+
+2) O uso do detector de gás portátil é prática estabelecida pelo PE-1PBR-00232 e PE-1PBR-00874, não necessitando de APN2 somente para indicar sua aplicação. Nesse caso a resposta para esse item é "NÃO".
+
+SimNão
+012Este trabalho envolve o uso de fonte de radiação ionizante?
+SimNão
+013O trabalho envolverá a abertura de equipamento ou linha, ou será realizado em equipamentos e sistemas pressurizados, de forma que sejam necessárias medidas de segurança adicionais à Matriz de Risco e Plano de Isolamento do PE1PBR00212?
+Exemplos de trabalhos com riscos não totalmente cobertos pelos documentos do PE-1PBR-00212:
+
+abertura de equipamento com possibilidade de pressão trapeada;
+ abertura de equipamento com sulfeto de ferro e possibilidade de combustão expontânea.
+NOTA: Trabalhos cujos cuidados sejam cobertos pelos documentos do PE1PBR00212, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+014O trabalho será realizado em equipamento ou sistema elétrico, com possibilidade de choque elétrico ou formação de arco elétrico, de forma que sejam necessárias medidas de segurança adicionais à Matriz de Risco, Plano de Isolamento ou Matriz de Trabalho Energizado do PE1PBR00213?
+NOTA: Trabalhos cujos cuidados sejam cobertos pelos documentos do PE1PBR00213, não necessitam APN2 adicional. Nesse caso a resposta para esse item é "NÃO".
+
+SimNão
+015Durante a execução do trabalho pode haver aproximação do executante com partes móveis de máquinas ou equipamentos, de forma que sejam necessárias medidas de segurança adicionais ao Plano de Isolamento estabelecido no PE1PBR00212?
+Exemplo de trabalho com riscos não totalmente cobertos pelos documentos do PE-1PBR-00212:
+- abertura de equipamento com possibilidade de energia potencial acumulada em conjuntos motor, redutor, freio e sistemas de força e giro de guindastes.
+
+NOTA: Trabalhos com partes móveis cujos cuidados sejam cobertos pelos documentos do PE1PBR00212, não necessitam APN2 adicional. Nesse caso a resposta para esse item é "NÃO".
+
+SimNão
+016Durante a execução do trabalho pode haver contato ou exposição do executante com Produtos Químicos sem proteção (ex.: substância corrosiva, tóxica, asfixiante etc.) de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por Procedimento, PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é "NÃO"
+
+SimNão
+017O trabalho envolve operações de mergulho?
+SimNão
+018O trabalho é de hidrojateamento?
+SimNão
+019O trabalho envolve manutenção em sistema de combate a incêndio por CO2 ou será realizado no interior de ambientes protegidos por CO2?
+SimNão
+020O trabalho envolve manutenção em sistema de combate a incêndio provocando sua indisponibilidade nas áreas protegidas?
+SimNão

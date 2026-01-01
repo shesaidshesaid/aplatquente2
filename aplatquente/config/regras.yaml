@@ -1,0 +1,84 @@
+# config/regras.yaml
+epi_radios_base:
+  # Identificador da pergunta EPI: Resposta padrão
+  Q001_CINTO: "Não"
+  Q002_VENT: "Não"
+  Q003_COLETE: "Não"
+  Q004_ILUM: "Não"
+  Q005_DPA: "Sim"
+  Q006_PROT_FACIAL: "Sim"
+
+epis_categoria_base:
+  Luvas:
+    - "LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')"
+  Proteção Respiratória:
+    - "NÃO APLICÁVEL"
+  Vestimentas:
+    - "DUPLA PROTEÇÃO AUDITIVA"
+    - "EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)"
+  Óculos:
+    - "ÓCULOS AMPLA VISÃO"
+    - "PROTETOR FACIAL"
+
+qpt_base:
+  Q001_MUDANCA: "Não"
+  Q001_PERMANENCIA: "Não"
+  Q002_ACOMP: "Sim"
+  Q002_MANOBRAS: "NA"
+  Q003_DRENADO: "NA"
+  Q004_SINALIZADO: "NA"
+  Q005_INSPECOES: "NA"
+  Q006_COMB_INC: "NA"
+  Q007_MANG_AR: "NA"
+  Q008_LOCAL_ISOLADO: "Sim"
+  Q009_FAGULHAS: "NA"
+  Q010_ACOPLADO: "NA"
+  Q011_TAMPONAMENTOS: "NA"
+  Q012_RISCO_PP: "Não"
+  Q013_INIBIR_SENSORES: "NA"
+  Q014_OBSERVADOR: "NA"
+
+epi_radios_base:
+  Q001_CINTO: "Não"
+  Q003_COLETE: "Não"
+  Q006_PROT_FACIAL: "Não"
+
+epis_categoria_base:
+  Óculos:
+    - "ÓCULOS SEGURANÇA CONTRA IMPACTO"
+  Luvas:
+    - "LUVA VAQUETA"
+
+qpt_base:
+  Q001_MUDANCA: "Não"
+
+apn1_map:
+  Q001: "tem_chama"
+  Q005: "tem_espaco_confinado"
+  Q006: "tem_altura"
+
+apn1_regras:
+  respostas:
+    alteracao_condicoes_operacionais: "Não"
+    temperatura_extrema: "tem_temperatura_extrema"
+    intervencao_controle_ou_protecao_paineis: "tem_intervencao_controle_ou_protecao_paineis"
+    intervencao_nobreak_cc_critico: "tem_intervencao_nobreak_cc_critico"
+    interfere_outras_areas: "tem_interferencia_outras_areas"
+    espaco_confinado: "tem_espaco_confinado"
+    altura_nr35: "tem_altura"
+    sobre_o_mar: "tem_sobre_o_mar"
+    risco_h2s: "tem_h2s"
+    chama_aberta_area_classificada: "tem_chama"
+    risco_centelha_faisca_estatica: "tem_centelha_faisca_estatica"
+    radiacao_ionizante: "tem_radiacao"
+    abertura_linha_pressurizado: "tem_pressurizado"
+    choque_ou_arco_eletrico: "tem_eletricidade"
+    partes_moveis: "tem_partes_moveis"
+
+    # Novas do modelo 20:
+    produtos_quimicos: "tem_produtos_quimicos"
+    combate_incendio_co2: "tem_co2"
+
+    mergulho: "tem_mergulho"
+    hidrojateamento: "tem_hidrojato"
+    combate_incendio_indisponibilidade: "tem_sci_indisp"
