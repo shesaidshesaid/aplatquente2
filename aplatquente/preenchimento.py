@@ -113,7 +113,7 @@ def _pick_radio_in_row_by_label(driver, row: WebElement, resp: str) -> Optional[
     """
     desired = _resp_norm(resp)
 
-    radios = row.find_elements(By.XPATH, ".//input[@type='radio' and not(@disabled)]")
+    radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
     for r in radios:
         rid = (r.get_attribute("id") or "").strip()
         if not rid:
@@ -140,7 +140,7 @@ def _pick_radio_in_row_by_value(row: WebElement, resp: str) -> Optional[WebEleme
     }
     wanted = value_map.get(desired, {desired})
 
-    radios = row.find_elements(By.XPATH, ".//input[@type='radio' and not(@disabled)]")
+    radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
     for r in radios:
         v = _norm(r.get_attribute("value") or "")
         if v in wanted:
@@ -158,22 +158,90 @@ def _mark_row_radio(driver, row: WebElement, resp: str) -> bool:
     """
     desired = _resp_norm(resp)
 
+    def _is_enabled(radio: WebElement) -> bool:
+        try:
+            return radio.is_enabled()
+        except Exception:
+            return False
+
+    def _activate_radio(radio: WebElement, log_force: bool = False) -> bool:
+        try:
+            if radio.is_selected():
+                return True
+        except Exception:
+            pass
+
+        rid = (radio.get_attribute("id") or "").strip()
+        if rid:
+            labels = row.find_elements(By.XPATH, f".//label[@for='{rid}']")
+            for lb in labels:
+                if _click(driver, lb):
+                    try:
+                        if radio.is_selected():
+                            return True
+                    except Exception:
+                        return True
+
+        try:
+            if radio.is_enabled() and _click(driver, radio):
+                return True
+        except Exception:
+            pass
+
+        try:
+            res = driver.execute_script(
+                """
+                const el = arguments[0];
+                if (!el) return false;
+                const prevDisabled = el.disabled;
+                el.scrollIntoView({block: 'center', behavior: 'smooth'});
+                el.disabled = false;
+                el.checked = true;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.disabled = prevDisabled;
+                return el.checked === true;
+                """,
+                radio,
+            )
+            if log_force:
+                print(f"[INFO] Radio desabilitado: tentativa JS -> {'ok' if res else 'falha'}")
+            if res:
+                return True
+        except Exception:
+            if log_force:
+                print("[WARN] JS para radio desabilitado falhou")
+
+        try:
+            driver.execute_script("arguments[0].click();", radio)
+            return True
+        except Exception:
+            return False
+
     r = _pick_radio_in_row_by_label(driver, row, desired) or _pick_radio_in_row_by_value(row, desired)
     if r:
-        return _click(driver, r)
+        return _activate_radio(r)
 
-    radios = row.find_elements(By.XPATH, ".//input[@type='radio' and not(@disabled)]")
-    if not radios:
+    radios_all = row.find_elements(By.XPATH, ".//input[@type='radio']")
+    if not radios_all:
         return False
 
+    enabled_radios = [r for r in radios_all if _is_enabled(r)]
+    radios = enabled_radios or radios_all
+
     # fallback por posição (heurístico)
+    target = None
     if desired == "SIM":
-        return _click(driver, radios[0])
-    if desired == "NAO":
-        return _click(driver, radios[1] if len(radios) > 1 else radios[0])
-    if desired == "NA":
-        return _click(driver, radios[2] if len(radios) > 2 else radios[-1])
-    return False
+        target = radios[0]
+    elif desired == "NAO":
+        target = radios[1] if len(radios) > 1 else radios[0]
+    elif desired == "NA":
+        target = radios[2] if len(radios) > 2 else radios[-1]
+
+    if target is None:
+        return False
+
+    return _activate_radio(target, log_force=not enabled_radios)
 
 
 def _mark_apn1_radio(driver, row: WebElement, resp: str) -> bool:
