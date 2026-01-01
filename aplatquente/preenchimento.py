@@ -18,6 +18,12 @@ from aplatquente.infra import (
     confirmar_etapa,
     click_like_legacy,
 )
+from aplatquente.plano import (
+    carregar_regras,
+    coletar_apn1_itens,
+    decidir_respostas_apn1,
+    montar_contexto,
+)
 
 
 # =============================================================================
@@ -170,6 +176,84 @@ def _mark_row_radio(driver, row: WebElement, resp: str) -> bool:
     return False
 
 
+def _mark_apn1_radio(driver, row: WebElement, resp: str) -> bool:
+    desired = _resp_norm(resp)
+
+    def matches(radio: WebElement) -> bool:
+        rid = (radio.get_attribute("id") or "").strip()
+        if rid:
+            labels = row.find_elements(By.XPATH, f".//label[@for='{rid}']")
+            for lb in labels:
+                if _resp_norm(lb.text or "") == desired:
+                    return True
+        v = _resp_norm(radio.get_attribute("value") or "")
+        return v == desired
+
+    def activate(radio: WebElement) -> bool:
+        try:
+            if radio.is_selected() and matches(radio):
+                return True
+        except Exception:
+            pass
+
+        try:
+            if radio.is_enabled() and _click(driver, radio):
+                return True
+        except Exception:
+            pass
+
+        try:
+            res = driver.execute_script(
+                """
+                const el = arguments[0];
+                if (!el) return false;
+                el.scrollIntoView({block: 'center', behavior: 'smooth'});
+                el.checked = true;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                return el.checked === true;
+                """,
+                radio,
+            )
+            if res:
+                return True
+        except Exception:
+            pass
+
+        try:
+            driver.execute_script("arguments[0].click();", radio)
+            return True
+        except Exception:
+            return False
+
+    radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
+    if not radios:
+        return False
+
+    for r in radios:
+        try:
+            if matches(r) and r.is_selected():
+                return True
+        except Exception:
+            continue
+
+    target = None
+    for r in radios:
+        if matches(r):
+            target = r
+            break
+
+    if target is None:
+        if desired == "SIM":
+            target = radios[0]
+        elif desired == "NAO":
+            target = radios[1] if len(radios) > 1 else radios[0]
+        else:
+            target = radios[-1]
+
+    return activate(target)
+
+
 # =============================================================================
 # Questionário PT
 # =============================================================================
@@ -310,27 +394,64 @@ def preencher_apn1(driver, timeout: float, descricao: str, caracteristicas: str)
     Wrapper: se você já tem o APN1Processor robusto no seu preenchimento.py,
     mantenha-o. Se ainda não tiver, implemente aqui.
     """
-    # Se você já colou o APN1Processor que usamos anteriormente, chame ele aqui.
-    # Caso contrário, por enquanto apenas navega e confirma (para não travar o fluxo).
     print("[STEP] APN-1...")
     goto_tab(driver, "APN-1", timeout)
     ensure_no_messagebox(driver, 2)
 
-    # tenta ao menos garantir que existem radios na tela
     try:
-        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.XPATH, "//input[@type='radio']")))
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='radio']"))
+        )
     except TimeoutException:
         print("[WARN] APN-1: nenhum radio encontrado.")
         confirmar_etapa(driver, timeout)
-        return {"total": 0, "ok": 0, "skipped": 0, "failed": 0}
+        return {"total": 0, "ok": 0, "fail": 0, "plano": {}}
 
-    # Se você já tem APN1Processor real, substitua o retorno abaixo pela chamada dele.
-    # Exemplo:
-    #   proc = APN1Processor(driver, timeout)
-    #   res = proc.preencher(descricao, caracteristicas)
-    #   return res
+    try:
+        regras = carregar_regras()
+    except Exception as e:
+        print(f"[WARN] Falha ao carregar regras.yaml: {e}")
+        regras = {}
 
-    # Placeholder “não quebra o fluxo”
-    print("[WARN] APN-1: handler real não plugado aqui (mantendo fluxo).")
+    ctx = montar_contexto(descricao or "", caracteristicas or "")
+    apn1_regras = regras.get("apn1_regras", {}) if isinstance(regras, dict) else {}
+
+    itens = coletar_apn1_itens(driver, timeout)
+    itens = decidir_respostas_apn1(ctx, itens, apn1_regras)
+
+    plano_por_ordem = {
+        (it.get("ordem") or "").strip(): it.get("resposta_planejada", "Não")
+        for it in itens
+        if (it.get("ordem") or "").strip()
+    }
+
+    rows = driver.find_elements(By.XPATH, "//div[starts-with(@id,'questao_') and .//input[@type='radio']]")
+    if not rows:
+        rows = driver.find_elements(
+            By.XPATH, "//div[contains(@class,'row') and starts-with(@id,'questao_') and .//input[@type='radio')]"
+        )
+
+    total = ok = fail = 0
+    for idx, row in enumerate(rows, 1):
+        total += 1
+        try:
+            ordem_el = row.find_element(By.XPATH, ".//div[contains(@class,'ordem')]")
+            ordem = (ordem_el.text or str(idx)).strip()
+        except Exception:
+            ordem = str(idx)
+
+        resp = plano_por_ordem.get(ordem, "Não")
+
+        try:
+            ensure_no_messagebox(driver, 0.5)
+            if _mark_apn1_radio(driver, row, resp):
+                ok += 1
+            else:
+                fail += 1
+            print(f"[INFO] APN-1 {ordem} -> {resp}")
+        except StaleElementReferenceException:
+            fail += 1
+
+    time.sleep(0.3)
     confirmar_etapa(driver, timeout)
-    return {"total": 0, "ok": 0, "skipped": 0, "failed": 0}
+    return {"total": total, "ok": ok, "fail": fail, "plano": plano_por_ordem}
