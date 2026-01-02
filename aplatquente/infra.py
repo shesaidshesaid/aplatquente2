@@ -5,38 +5,37 @@ import time
 from typing import Optional, TypeAlias
 
 from selenium import webdriver
-from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.edge.webdriver import WebDriver as EdgeDriver
 
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 
-from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
 
 from selenium.common.exceptions import (
-    TimeoutException,
-    StaleElementReferenceException,
     ElementClickInterceptedException,
+    StaleElementReferenceException,
+    TimeoutException,
     WebDriverException,
 )
-
-from selenium.webdriver.common.action_chains import ActionChains
 
 Driver: TypeAlias = EdgeDriver
 
 from aplatquente.config.xpaths import (
     MAIN_SCREEN_INDICATORS,
     SEARCH_RESULT_XPATHS,
+    XPATH_BTN_CONFIRMAR,
     XPATH_BTN_EXIBIR_OPCOES,
+    XPATH_BTN_FECHAR,
+    XPATH_BTN_OK,
+    XPATH_BTN_PESQUISAR,
     XPATH_CAMPO_DATA,
     XPATH_CAMPO_NUMERO,
-    XPATH_BTN_PESQUISAR,
-    XPATH_BTN_FECHAR,
-    XPATH_BTN_CONFIRMAR,
-    XPATH_BTN_OK,
 )
 
 
@@ -118,10 +117,6 @@ def click_like_legacy(
 # - Para trabalhar em outra aba: clicar aba -> aguardar carregar -> operar
 # - Ao terminar cada aba: clicar "Confirmar" (rodapé fixo) -> aguardar -> só então trocar de aba
 # =============================================================================
-
-from selenium.webdriver.support.wait import WebDriverWait  # (Pylance prefere este)
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 # --- XPaths das abas (texto é mais robusto; absolutos ficam como fallback) ---
 TAB_XPATHS: dict[str, list[str]] = {
@@ -1006,25 +1001,48 @@ def fechar_modal_etapa(driver: Driver, timeout: float) -> None:
 
 
 def clicar_botao_confirmar_rodape(driver: Driver, timeout: float) -> None:
-    """Clica no botão 'Confirmar' no rodapé da etapa."""
-    btn = WebDriverWait(driver, timeout).until(
-        EC.element_to_be_clickable((By.XPATH, XPATH_BTN_CONFIRMAR))
-    )
-    try:
-        btn.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", btn)
+    """Clica no botão 'Confirmar' no rodapé da etapa com fallback JS e espera básica."""
 
-    # Pop-up de confirmação extra
+    ensure_no_messagebox(driver, 1.0)
+
+    candidatos = [XPATH_BTN_CONFIRMAR]
+    candidatos.extend(XPATH_BTN_CONFIRMAR_FALLBACKS)
+
+    btn = None
+    ultimo_erro: Exception | None = None
+
+    for xp in candidatos:
+        try:
+            btn = WebDriverWait(driver, min(timeout, 8.0)).until(
+                EC.element_to_be_clickable((By.XPATH, xp))
+            )
+            break
+        except Exception as e:
+            ultimo_erro = e
+
+    if not btn:
+        raise RuntimeError(f"Botão Confirmar não encontrado: {ultimo_erro}")
+
+    ok = click_like_legacy(driver, btn, max_attempts=3, scroll=True, label="CONFIRMAR_RODAPE")
+    if not ok:
+        raise RuntimeError("Falha ao clicar no botão Confirmar (rodapé).")
+
+    time.sleep(0.3)
+    ensure_no_messagebox(driver, 3.0)
+
     try:
-        ok_btn = WebDriverWait(driver, 5).until(
+        WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, XPATH_BTN_CONFIRMAR_FALLBACKS[0]))
+        )
+    except Exception:
+        pass
+
+    try:
+        ok_btn = WebDriverWait(driver, 3).until(
             EC.element_to_be_clickable((By.XPATH, XPATH_BTN_OK))
         )
-        try:
-            ok_btn.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", ok_btn)
-    except TimeoutException:
+        click_like_legacy(driver, ok_btn, max_attempts=2, scroll=True, label="OK_MSGBOX")
+    except Exception:
         pass
 
     print("[INFO] Botão Confirmar acionado e confirmado (se necessário).")

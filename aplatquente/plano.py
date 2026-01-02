@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from selenium.webdriver.common.by import By
 
-from aplatquente.infra import Driver, safe_find_element
+from aplatquente.infra import Driver, clicar_botao_confirmar_rodape, safe_find_element
 
 
 # =============================================================================
@@ -517,93 +517,90 @@ def gerar_plano_trabalho_quente(driver: Driver, timeout: float, regras_path: Opt
         "epis_cat": epis_cat,
         "apn1_itens": apn1_itens,
         "apn1_por_ordem": apn1_por_ordem,
-
-
     }
 
-from typing import Any, Dict
 
-
-from typing import Any, Dict, Optional, Union
-
-
-# aplatquente/plano.py  (substitua a função aplicar_plano inteira por esta)
-
-from typing import Any, Dict
-
+# =============================================================================
+# Aplicação do plano
+# =============================================================================
 def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     """
     Aplica o plano gerado preenchendo as abas relevantes.
-    Regra operacional: cada rotina deve clicar em Confirmar e aguardar salvar antes de trocar de aba.
-    (As rotinas em preenchimento.py/epi.py já fazem isso.)
+    Regra operacional: cada rotina deve clicar em Confirmar e aguardar salvar antes
+    de trocar de aba.
     """
+
     resultado: Dict[str, Any] = {
         "qpt": None,
         "analise_ambiental": None,
-        "epi_adicional": None,
-        "epi_categoria": None,
+        "epi_radios": None,
+        "epi_cat": None,
         "apn1": None,
         "warnings": [],
     }
 
-    # Imports aqui dentro para evitar ciclo de import no projeto
     try:
         from aplatquente.preenchimento import (
-            preencher_questionario_pt,
             preencher_analise_ambiental,
             preencher_apn1,
+            preencher_questionario_pt,
+            preencher_epi_adicional,
         )
-        from aplatquente.epi import (
-            aplicar_epi_adicional,
-            aplicar_epi_por_categoria,
-        )
-    except Exception as e:
+        from aplatquente.epi import processar_aba_epi
+    except Exception as e:  # pragma: no cover - proteção de runtime
         resultado["warnings"].append(f"Imports de preenchimento/epi falharam: {e}")
         return resultado
+
+    def _confirmar(complemento: str) -> None:
+        try:
+            clicar_botao_confirmar_rodape(driver, timeout)
+        except Exception as e:  # pragma: no cover - robustez
+            resultado["warnings"].append(f"Confirmar após {complemento} falhou: {e}")
 
     # 1) Questionário PT
     try:
         qpt = plano.get("qpt", {}) or plano.get("questionario_pt", {}) or {}
         if qpt:
             resultado["qpt"] = preencher_questionario_pt(driver, qpt, timeout)
+            _confirmar("Questionário PT")
     except Exception as e:
         resultado["warnings"].append(f"Questionário PT não aplicado: {e}")
 
-    # 2) Análise Ambiental (padrão: Não)
+    # 2) Análise Ambiental
     try:
         resultado["analise_ambiental"] = preencher_analise_ambiental(driver, timeout)
+        _confirmar("Análise Ambiental")
     except Exception as e:
         resultado["warnings"].append(f"Análise Ambiental não aplicada: {e}")
 
     # 3) EPI adicional (radios)
     try:
-        epi_rad = plano.get("epi_adicional", {}) or plano.get("epi_radios", {}) or {}
+        epi_rad = plano.get("epi_radios", {}) or plano.get("epi_adicional", {}) or {}
         if epi_rad:
-            resultado["epi_adicional"] = aplicar_epi_adicional(driver, timeout, epi_rad)
+            resultado["epi_radios"] = preencher_epi_adicional(driver, epi_rad, timeout)
+            _confirmar("EPI adicional")
     except Exception as e:
         resultado["warnings"].append(f"EPI adicional não aplicado: {e}")
 
-    # 4) EPI por categoria (checkbox/toggles)
+    # 4) EPIs por categoria
     try:
         epi_cat = plano.get("epis_cat", {}) or plano.get("epi_categoria", {}) or {}
         if epi_cat:
-            resultado["epi_categoria"] = aplicar_epi_por_categoria(driver, epi_cat, timeout)
+            resultado["epi_cat"] = processar_aba_epi(driver, epi_cat, timeout)
+            _confirmar("EPI por categoria")
     except Exception as e:
-        resultado["warnings"].append(f"EPI por categoria não aplicado: {e}")
+        resultado["warnings"].append(f"EPI por categoria não aplicada: {e}")
 
-    # 5) APN-1 (dinâmica)
+    # 5) APN-1
     try:
         desc = plano.get("descricao", "") or ""
         carac = plano.get("caracteristicas", "") or ""
         resultado["apn1"] = preencher_apn1(driver, timeout, desc, carac)
+        _confirmar("APN-1")
     except Exception as e:
         resultado["warnings"].append(f"APN-1 não aplicada: {e}")
 
     return resultado
-
-
-
-
 
 
 def imprimir_plano(plano: Dict[str, Any]) -> None:
