@@ -7,10 +7,10 @@ from typing import Dict, Iterable, Set
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
-from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
 
-from aplatquente.infra import goto_tab, ensure_no_messagebox, confirmar_etapa, click_like_legacy
+from aplatquente.infra import click_like_legacy, confirmar_etapa, ensure_no_messagebox, goto_tab
 
 
 def _norm(s: str) -> str:
@@ -137,3 +137,12 @@ def aplicar_epi_por_categoria(driver, epis_categorias: Dict[str, Iterable[str]],
     time.sleep(0.3)
     confirmar_etapa(driver, timeout)
     return {"total": total, "ok": ok, "fail": fail}
+
+
+def processar_aba_epi(driver, epis_cat: Dict[str, Iterable[str]], timeout: float):
+    """Wrapper público esperado: processa EPIs por categoria e retorna resumo."""
+    try:
+        return aplicar_epi_por_categoria(driver, epis_cat, timeout)
+    except Exception as e:
+        print(f"[WARN] Erro ao processar aba EPI: {e}")
+        return None

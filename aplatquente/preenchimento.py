@@ -3,20 +3,20 @@ from __future__ import annotations
 
 import time
 import unicodedata
-from typing import Dict, Optional, Iterable, Tuple, List
+from typing import Dict, List, Optional
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
-from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 from aplatquente.infra import (
+    click_like_legacy,
+    confirmar_etapa,
+    ensure_no_messagebox,
     goto_tab,
     safe_find_element,
-    ensure_no_messagebox,
-    confirmar_etapa,
-    click_like_legacy,
 )
 from aplatquente.plano import (
     carregar_regras,
