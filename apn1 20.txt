@@ -2,21 +2,27 @@ apn1 20
 
 1/2019/2023
 
-
-/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[1]
-
-<div _ngcontent-ng-c3786019781="" class="row ng-star-inserted" id="questao_379"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 001 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta pergunta-par col-md-7">A execução deste trabalho implica em alteração nas condições operacionais, de forma não prevista em análise de risco e procedimento pré-estabelecido, que possa acarretar parada de sistemas de segurança ou provocar emergência?</div><div _ngcontent-ng-c3786019781="" class="form-group col-md-4"><div _ngcontent-ng-c3786019781="" class="resposta simnao ng-star-inserted"><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_65_379_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_65_379_0_label" for="APN1_3795_65_379_0">Sim</label></span><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_65_379_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_65_379_1_label" for="APN1_3795_65_379_1">Não</label></span><!----></div><!----><!----><!----></div></div>
-
-/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[20]
-
-<div _ngcontent-ng-c3786019781="" class="row ng-star-inserted" id="questao_402"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 020 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta col-md-7">O trabalho envolve manutenção em sistema de combate a incêndio provocando sua indisponibilidade nas áreas protegidas?</div><div _ngcontent-ng-c3786019781="" class="form-group col-md-4"><div _ngcontent-ng-c3786019781="" class="resposta simnao ng-star-inserted"><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_84_402_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_84_402_0_label" for="APN1_3795_84_402_0">Sim</label></span><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_84_402_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_84_402_1_label" for="APN1_3795_84_402_1">Não</label></span><!----></div><!----><!----><!----></div></div>
+padrão:
 
 
-/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[3]/div
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[2]
 
-<div class="app-modal-footer"><app-botoes-etapa><button type="button" class="btn btn-primary ng-star-inserted" style="float: left;">Cadastrar Precedências</button><!----><button type="button" class="btn btn-primary ng-star-inserted" style="float: left;">Visualizar Precedências</button><!----><!----><!----><!----><button type="button" class="btn btn-primary">Confirmar</button><button type="button" class="btn btn-default">Fechar</button></app-botoes-etapa></div>
+<div _ngcontent-ng-c3786019781="" class="row ng-star-inserted" id="questao_380"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 002 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta col-md-7">Durante a execução deste trabalho pode haver contato com temperatura extrema em equipamentos ou sistemas sem proteção térmica?</div><div _ngcontent-ng-c3786019781="" class="form-group col-md-4"><div _ngcontent-ng-c3786019781="" class="resposta simnao ng-star-inserted"><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_66_380_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_66_380_0_label" for="APN1_3795_66_380_0">Sim</label></span><span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_66_380_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_66_380_1_label" for="APN1_3795_66_380_1">Não</label></span><!----></div><!----><!----><!----></div></div>
 
-Análise Preliminar de Nível 1
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[2]/div[2]
+
+<div _ngcontent-ng-c3786019781="" class="form-group pergunta col-md-7">Durante a execução deste trabalho pode haver contato com temperatura extrema em equipamentos ou sistemas sem proteção térmica?</div>
+
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[2]/div[3]/div/span[1]
+
+<span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_66_380_0" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_66_380_0_label" for="APN1_3795_66_380_0">Sim</label></span>
+
+/html/body/app-root/div/app-permissao-trabalho/div/app-programacao-diaria/app-dynamic-component/app-form-etapa/app-modal/div/div/div/div[2]/div/app-cadastrar-etapa/app-tabs/app-tab[7]/div/app-apn1-da-etapa/app-questionario/section/form/div/div[2]/div[3]/div/span[2]
+
+<span _ngcontent-ng-c3786019781="" class="ng-star-inserted"><input _ngcontent-ng-c3786019781="" type="radio" id="APN1_3795_66_380_1" class="ng-untouched ng-pristine" disabled=""><label _ngcontent-ng-c3786019781="" id="APN1_3795_66_380_1_label" for="APN1_3795_66_380_1">Não</label></span>
+
+texto das 20 questões: 
+
 001A execução deste trabalho implica em alteração nas condições operacionais, de forma não prevista em análise de risco e procedimento pré-estabelecido, que possa acarretar parada de sistemas de segurança ou provocar emergência?
 SimNão
 002Durante a execução deste trabalho pode haver contato com temperatura extrema em equipamentos ou sistemas sem proteção térmica?
@@ -80,3 +86,4 @@ SimNão
 SimNão
 020O trabalho envolve manutenção em sistema de combate a incêndio provocando sua indisponibilidade nas áreas protegidas?
 SimNão
+

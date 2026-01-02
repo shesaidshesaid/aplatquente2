@@ -1,0 +1,4931 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+aplatquente.py
+Automação APLAT (P-18) - Trabalho a Quente
+"""
+
+import argparse
+import os
+import sys
+import time
+from datetime import datetime
+from typing import Tuple, List, Optional, TextIO
+from functools import wraps
+from contextlib import contextmanager
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
+from quent1_infra import (
+    create_edge_driver,
+    wait_for_document_ready,
+    perform_search,
+    goto_tab,
+    fechar_modal_etapa,
+    clicar_botao_confirmar_rodape,
+    attempt_auto_login,
+    safe_find_element,
+)
+from quent2_plano import (
+    normalizar_texto,
+    gerar_plano_trabalho_quente,
+    imprimir_relatorio_plano,
+    coletar_descricao,
+    coletar_caracteristicas_trabalho,
+)
+from quent3_preenchimento import (
+    preencher_questionario_pt,
+    preencher_epi_adicional,
+    preencher_analise_ambiental,
+    preencher_apn1,
+)
+from quent4_epi import processar_aba_epi
+
+# -------------------------------------------------------------------
+# Constantes e Configurações
+# -------------------------------------------------------------------
+DEFAULT_TIMEOUT = 30.0
+DEFAULT_SEARCH_TIMEOUT = 30.0
+DEFAULT_DETAIL_WAIT = 0.3
+DEFAULT_POST_WAIT = 0.3
+
+DEFAULT_APLAT_URL = (
+    "https://aplat.petrobras.com.br/#/permissaotrabalho/P-18/planejamento/programacaodiaria"
+)
+
+
+# -------------------------------------------------------------------
+# Decorator para medição de tempo otimizado
+# -------------------------------------------------------------------
+def timeit_decorator(func_name: Optional[str] = None):
+    """Decorator para medição de tempo de execução com nome customizado."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            name = func_name or func.__name__
+            print(f"[TIMER] {name}: {elapsed:.3f}s")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# -------------------------------------------------------------------
+# Classes utilitárias otimizadas
+# -------------------------------------------------------------------
+class Tee:
+    """Redireciona output para múltiplos streams."""
+    __slots__ = ('streams',)
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str):
+        """Escreve dados em todos os streams."""
+        for stream in self.streams:
+            try:
+                stream.write(data)
+                stream.flush()
+            except (IOError, OSError):
+                continue
+
+    def flush(self):
+        """Flush em todos os streams."""
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except (IOError, OSError):
+                continue
+
+
+# -------------------------------------------------------------------
+# Funções utilitárias
+# -------------------------------------------------------------------
+def ts() -> str:
+    """Timestamp formatado para logs."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def is_trabalho_quente(tipo_trabalho: str) -> bool:
+    """Verifica se o tipo de trabalho é 'Trabalho a Quente'."""
+    return "TRABALHO A QUENTE" in normalizar_texto(tipo_trabalho)
+
+
+# -------------------------------------------------------------------
+# Coleta de informações da etapa - versão otimizada
+# -------------------------------------------------------------------
+def coletar_tipo_trabalho(driver, timeout: float) -> Tuple[str, str, List[Tuple[str, str]]]:
+    """
+    Coleta informações do campo 'Tipo Trabalho'.
+
+    Returns:
+        Tuple com (valor, texto, lista_de_opcoes)
+    """
+    XPATH_TIPO_TRABALHO = (
+        "//span[@id='label-subtitulo' and normalize-space()='Tipo Trabalho']"
+        "/ancestor::div[contains(@class,'input-group')][1]"
+        "//app-combo-box[@formcontrolname='tipoPT']//select"
+    )
+
+    select_element = safe_find_element(driver, XPATH_TIPO_TRABALHO, timeout)
+    if not select_element:
+        print("[WARN] Não foi possível localizar o combo 'Tipo Trabalho' (tipoPT).")
+        return "", "", []
+
+    try:
+        selector = Select(select_element)
+        # Obtém opção selecionada
+        selected_option = selector.first_selected_option if selector.all_selected_options else None
+        valor = selected_option.get_attribute("value") if selected_option else ""
+        texto = selected_option.text.strip() if selected_option else ""
+
+        # Coleta todas as opções disponíveis
+        opcoes = [
+            (opt.get_attribute("value") or "", opt.text.strip())
+            for opt in selector.options
+        ]
+
+        print(f"[INFO] Tipo Trabalho selecionado: value='{valor}', texto='{texto}'")
+        return valor, texto, opcoes
+
+    except Exception as e:
+        print(f"[WARN] Erro ao coletar tipo de trabalho: {e}")
+        return "", "", []
+
+
+def coletar_tipo_etapa(driver, timeout: float) -> str:
+    """
+    Identifica o tipo de etapa selecionado nos radio buttons.
+
+    Returns:
+        Texto do tipo de etapa ou string de erro
+    """
+    XPATH_FIELDSET = "//legend[contains(normalize-space(),'Tipo de Etapa')]/.."
+
+    try:
+        fieldset = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, XPATH_FIELDSET))
+        )
+
+        # Encontra radio button selecionado
+        selected_radio = fieldset.find_element(
+            By.XPATH, ".//input[@type='radio' and @checked]"
+        )
+
+        if selected_radio:
+            radio_id = selected_radio.get_attribute("id")
+            if radio_id:
+                label = fieldset.find_element(By.XPATH, f".//label[@for='{radio_id}']")
+                tipo_etapa_text = label.text.strip()
+            else:
+                tipo_etapa_text = "(sem ID)"
+        else:
+            # Fallback: procura manualmente
+            tipo_etapa_text = encontrar_radio_selecionado(fieldset)
+
+        print(f"[INFO] Tipo de Etapa selecionado: {tipo_etapa_text}")
+        return tipo_etapa_text
+
+    except Exception as e:
+        print(f"[WARN] Não foi possível ler 'Tipo de Etapa': {e}")
+        return "(erro)"
+
+
+def encontrar_radio_selecionado(fieldset) -> str:
+    """Função auxiliar para encontrar radio button selecionado manualmente."""
+    radios = fieldset.find_elements(By.XPATH, ".//input[@type='radio']")
+    for radio in radios:
+        try:
+            if radio.is_selected():
+                radio_id = radio.get_attribute("id")
+                if radio_id:
+                    label = fieldset.find_element(By.XPATH, f".//label[@for='{radio_id}']")
+                    return label.text.strip()
+        except Exception:
+            continue
+    return "(não identificado)"
+
+
+# -------------------------------------------------------------------
+# Função principal para processar uma etapa - versão otimizada
+# -------------------------------------------------------------------
+@timeit_decorator()
+def processar_etapa(driver, args, numero_etapa: str, idx: int, total: int) -> bool:
+    """Processa uma única etapa e retorna True se bem sucedida."""
+    print_separador(f"Iniciando análise da etapa {idx}/{total}: {numero_etapa} (data {args.data})")
+
+    # Fecha modal se não for a primeira etapa
+    if idx > 1:
+        fechar_modal_etapa(driver, args.timeout)
+
+    # 1. Pesquisar e abrir a etapa
+    if not abrir_etapa(driver, args, numero_etapa):
+        return False
+
+    # 2. Ir para a aba "Dados da Etapa"
+    if not navegar_para_dados_etapa(driver, args.timeout):
+        return False
+
+    # 3. Coletar e validar tipo de trabalho
+    if not validar_tipo_trabalho(driver, args.timeout):
+        return True  # Retorna True mas ignora etapas não-quente
+
+    # 4. Coletar descrição e características
+    descricao, caracteristicas = coletar_dados_etapa(driver, args.timeout)
+
+    # 5. Gerar e executar plano
+    executar_plano_completo(driver, args, numero_etapa, descricao, caracteristicas)
+
+    # 6. Confirmar a etapa
+    confirmar_etapa(driver, args.timeout)
+
+    return True
+
+
+def print_separador(titulo: str, largura: int = 70):
+    """Imprime separador formatado com título."""
+    print(f"\n{'=' * largura}")
+    print(f"[INFO] {titulo}")
+    print(f"{'=' * largura}")
+
+
+def abrir_etapa(driver, args, numero_etapa: str) -> bool:
+    """Pesquisa e abre a etapa especificada."""
+    try:
+        perform_search(
+            driver,
+            args.data,
+            numero_etapa,
+            args.timeout,
+            args.search_timeout,
+            args.detail_wait,
+        )
+        return True
+    except TimeoutException as e:
+        print(f"[ERROR] Falha ao localizar resultados para '{numero_etapa}': {e}")
+        return False
+
+
+def navegar_para_dados_etapa(driver, timeout: float) -> bool:
+    """Navega para a aba 'Dados da Etapa'."""
+    try:
+        goto_tab(driver, "Dados da Etapa", timeout)
+        return True
+    except TimeoutException:
+        print("[ERROR] Aba 'Dados da Etapa' não encontrada. Pulando esta etapa.")
+        return False
+
+
+def validar_tipo_trabalho(driver, timeout: float) -> bool:
+    """Valida se o tipo de trabalho é 'Trabalho a Quente'."""
+    _, tipo_trabalho_txt, _ = coletar_tipo_trabalho(driver, timeout)
+    coletar_tipo_etapa(driver, timeout)  # Apenas para logging
+
+    if not is_trabalho_quente(tipo_trabalho_txt):
+        print(f"[INFO] Tipo Trabalho NÃO é 'Trabalho a Quente' (é '{tipo_trabalho_txt}'). Etapa será ignorada.")
+        return False
+    return True
+
+
+def coletar_dados_etapa(driver, timeout: float) -> Tuple[str, str]:
+    """Coleta descrição e características da etapa."""
+    descricao = coletar_descricao(driver, timeout)
+    caracteristicas = coletar_caracteristicas_trabalho(driver, timeout)
+
+    if not descricao:
+        print("[INFO] Descrição: (não encontrada ou vazia)")
+    if not caracteristicas:
+        print("[INFO] Características do trabalho: (não encontradas ou vazias)")
+
+    return descricao, caracteristicas
+
+
+def executar_plano_completo(driver, args, numero_etapa: str,
+                            descricao: str, caracteristicas: str):
+    """Gera e executa o plano completo de trabalho a quente."""
+    plano = gerar_plano_trabalho_quente(descricao, caracteristicas)
+
+    imprimir_relatorio_plano(
+        numero_etapa,
+        args.data,
+        coletar_tipo_trabalho(driver, args.timeout)[1],
+        descricao,
+        caracteristicas,
+        plano,
+    )
+
+    # **CORREÇÃO: Ordem otimizada com tratamento de modais**
+    from quent1_infra import ensure_no_messagebox
+
+    formularios = [
+        ("Questionário PT", lambda: preencher_questionario_pt(driver, args.timeout, plano["qpt"])),
+        # Fechar modais antes de EPI adicional
+        ("Fechar modais", lambda: ensure_no_messagebox(driver, args.timeout)),
+        ("EPI adicional", lambda: preencher_epi_adicional(driver, args.timeout, plano["epi_radios"])),
+        ("Análise Ambiental", lambda: preencher_analise_ambiental(driver, args.timeout)),
+        ("APN-1", lambda: preencher_apn1(driver, args.timeout, descricao, caracteristicas)),
+        ("EPI", lambda: processar_aba_epi(driver, args.timeout, plano["epis_cat"])),
+    ]
+
+    for nome_form, executar in formularios:
+        try:
+            print(f"\n[STEP] Processando {nome_form}...")
+            executar()
+            # Pequena pausa entre formulários
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"[ERROR] Erro no preenchimento de {nome_form}: {e}")
+
+
+def preencher_questionarios(driver, args, plano: dict,
+                            descricao: str, caracteristicas: str):
+    """Gerencia o preenchimento de todos os questionários."""
+    formularios = [
+        ("Questionário PT", lambda: preencher_questionario_pt(driver, args.timeout, plano["qpt"])),
+        ("EPI adicional", lambda: preencher_epi_adicional(driver, args.timeout, plano["epi_radios"])),
+        ("Análise Ambiental", lambda: preencher_analise_ambiental(driver, args.timeout)),
+        ("APN-1", lambda: preencher_apn1(driver, args.timeout, descricao, caracteristicas)),
+        ("EPI", lambda: processar_aba_epi(driver, args.timeout, plano["epis_cat"])),
+    ]
+
+    for nome_form, executar in formularios:
+        try:
+            executar()
+        except Exception as e:
+            print(f"[ERROR] Erro no preenchimento de {nome_form}: {e}")
+
+
+def confirmar_etapa(driver, timeout: float):
+    """Confirma a etapa no rodapé."""
+    try:
+        print("[INFO] Efetuando confirmação geral da etapa no rodapé...")
+        clicar_botao_confirmar_rodape(driver, timeout)
+    except Exception as e:
+        print(f"[WARN] Falha na confirmação geral da etapa: {e}")
+
+
+# -------------------------------------------------------------------
+# Argumentos de linha de comando - versão otimizada
+# -------------------------------------------------------------------
+def parse_args():
+    """Configura e parseia argumentos de linha de comando."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "aplatquente.py – Trabalho a Quente "
+            "(gera plano + preenche Questionário PT, EPI adicional, Análise Ambiental, APN-1 e EPI)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Grupo: Configurações de URL e dados
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_APLAT_URL,
+        help="URL do APLAT (padrão: programação diária da P-18)"
+    )
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="Data no formato dd/mm/aaaa para filtro da etapa"
+    )
+    parser.add_argument(
+        "--valor",
+        nargs="+",
+        required=True,
+        help="Um ou mais números da etapa (ex: '2/1015/2024')"
+    )
+
+    # Grupo: Configurações de login
+    parser.add_argument(
+        "--use-keyring",
+        action="store_true",
+        help="Usar keyring para senha"
+    )
+    parser.add_argument(
+        "--user",
+        help="Usuário para login (obrigatório se usar keyring)"
+    )
+    parser.add_argument(
+        "--keyring-service",
+        default="aplat.petrobras",
+        help="Nome do serviço no keyring (default: aplat.petrobras)"
+    )
+
+    # Grupo: Configurações de tempo
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="Timeout padrão de waits explícitos"
+    )
+    parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=DEFAULT_SEARCH_TIMEOUT,
+        help="Timeout máximo para aguardar resultado da pesquisa (em segundos)"
+    )
+    parser.add_argument(
+        "--detail-wait",
+        type=float,
+        default=DEFAULT_DETAIL_WAIT,
+        help="Pausa após abrir a etapa"
+    )
+    parser.add_argument(
+        "--post-wait",
+        type=float,
+        default=DEFAULT_POST_WAIT,
+        help="Pausa final antes de encerrar"
+    )
+
+    # Grupo: Logs e debug
+    parser.add_argument(
+        "--log",
+        help="Se informado, salva todo o output deste script em um arquivo TXT."
+    )
+    parser.add_argument(
+        "--debug-locators",
+        action="store_true",
+        help="Ativa logs detalhados de XPaths / localizadores usados no Selenium."
+    )
+
+    return parser.parse_args()
+
+
+@contextmanager
+def gerenciar_log(args):
+    """Context manager para gerenciar arquivo de log."""
+    original_stdout = sys.stdout
+    log_file = None
+
+    if args.log:
+        try:
+            log_file = open(args.log, "w", encoding="utf-8")
+            sys.stdout = Tee(original_stdout, log_file)
+            print(f"[INFO] Log TXT ativado. Arquivo: {args.log}")
+            yield
+        except Exception as e:
+            print(f"[WARN] Não foi possível abrir o arquivo de log '{args.log}': {e}")
+            sys.stdout = original_stdout
+            yield
+        finally:
+            if log_file:
+                try:
+                    sys.stdout = original_stdout
+                    log_file.close()
+                except Exception:
+                    pass
+    else:
+        yield
+
+
+# -------------------------------------------------------------------
+# Função principal otimizada
+# -------------------------------------------------------------------
+@timeit_decorator("script_completo")
+def main():
+    """Função principal do script."""
+    args = parse_args()
+
+    with gerenciar_log(args):
+        print("[INFO] Iniciando aplatquente.py (plano + preenchimento QPT / EPI adicional / AA / APN-1 / EPI).")
+        if args.debug_locators:
+            print("[INFO] DEBUG_LOCATORS ativado: serão registrados detalhes de XPaths / localizadores.")
+
+        driver = create_edge_driver()
+
+        try:
+            # Login e preparação
+            if not attempt_auto_login(driver, args, args.timeout, args.url):
+                print("[ERROR] Abortando por falha de login.")
+                return
+
+            wait_for_document_ready(driver, args.timeout)
+
+            # Processar cada etapa
+            total_etapas = len(args.valor)
+            for idx, numero_etapa in enumerate(args.valor, 1):
+                processar_etapa(driver, args, numero_etapa, idx, total_etapas)
+
+            print("[INFO] Processo concluído (plano + preenchimento QPT / EPI adicional / AA / APN-1 / EPI).")
+            time.sleep(args.post_wait)
+
+        finally:
+            try:
+                input("Pressione ENTER para encerrar e fechar o navegador...")
+            except EOFError:
+                pass
+            finally:
+                driver.quit()
+
+
+if __name__ == "__main__":
+    main()
+
+****************************************************
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+quent1_infra.py
+Infraestrutura para automação APLAT - Selenium, login, navegação
+"""
+
+import os
+import time
+from typing import Optional, Tuple, List, Callable, Any
+from functools import wraps, lru_cache
+from contextlib import contextmanager
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.edge.service import Service as EdgeService
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    NoSuchElementException,
+)
+
+# -------------------------------------------------------------------
+# Constantes e Configurações
+# -------------------------------------------------------------------
+EDGE_OPTIONS = [
+    "--start-maximized",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+]
+
+# XPATHS reutilizáveis
+XPATH_BTN_EXIBIR_OPCOES = "//button[normalize-space()='Exibir opções']"
+XPATH_CAMPO_DATA = "//input[@placeholder='Selecione uma data']"
+XPATH_CAMPO_NUMERO = "//input[@formcontrolname='numeroetapa']"
+XPATH_BTN_PESQUISAR = "//button[normalize-space()='Pesquisar']"
+XPATH_BTN_FECHAR = "//app-botoes-etapa//button[normalize-space()='Fechar']"
+XPATH_BTN_CONFIRMAR = "//app-botoes-etapa//button[normalize-space()='Confirmar']"
+XPATH_MESSAGEBOX = "//app-messagebox//div[contains(@class,'modal') and contains(@class,'in')]"
+XPATH_BTN_OK = "//app-messagebox//button[normalize-space()='Ok']"
+
+# Tentativas de login
+SUBMIT_XPATHS = [
+    "//button[normalize-space()='Entrar']",
+    "//button[normalize-space()='Acessar']",
+    "//input[@type='submit']",
+    "//button[contains(.,'Sign in') or contains(.,'Login')]",
+]
+
+# Indicadores de tela principal
+MAIN_SCREEN_INDICATORS = [
+    "//button[normalize-space()='Exibir opções']",
+    "//a[normalize-space()='EPI']",
+    "//h3[contains(.,'Cadastro de PT')]",
+]
+
+# Caminhos para resultados da pesquisa
+SEARCH_RESULT_XPATHS = [
+    "(//app-grid//table/tbody/tr)[1]",
+    "(//table//tbody//tr)[1]",
+    "(//ul[contains(@class,'list-group')]//li[contains(@class,'listagem')])[1]",
+]
+
+
+# -------------------------------------------------------------------
+# Decorator para medição de tempo otimizado
+# -------------------------------------------------------------------
+def timeit_decorator(func_name: Optional[str] = None):
+    """Decorator para medição de tempo de execução."""
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            name = func_name or func.__name__
+            print(f"[TIMER] {name}: {elapsed:.3f}s")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# -------------------------------------------------------------------
+# Cache para elementos frequentemente acessados
+# -------------------------------------------------------------------
+class ElementCache:
+    """Cache simples para elementos DOM."""
+
+    def __init__(self, maxsize: int = 100):
+        self.cache = {}
+        self.maxsize = maxsize
+
+    def get(self, key: str, driver, finder: Callable) -> Optional[Any]:
+        """Obtém elemento do cache ou busca."""
+        if key not in self.cache:
+            element = finder()
+            if element:
+                self._add_to_cache(key, element)
+        return self.cache.get(key)
+
+    def _add_to_cache(self, key: str, element: Any):
+        """Adiciona elemento ao cache."""
+        if len(self.cache) >= self.maxsize:
+            # Remove o mais antigo (simples FIFO)
+            self.cache.pop(next(iter(self.cache)))
+        self.cache[key] = element
+
+    def clear(self):
+        """Limpa o cache."""
+        self.cache.clear()
+
+
+element_cache = ElementCache()
+
+
+# -------------------------------------------------------------------
+# Criação e configuração do WebDriver
+# -------------------------------------------------------------------
+def create_edge_driver() -> webdriver.Edge:
+    """Cria e configura instância do WebDriver Edge."""
+    options = EdgeOptions()
+
+    # Adiciona argumentos de forma mais eficiente
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    for arg in EDGE_OPTIONS:
+        options.add_argument(arg)
+
+    # Tenta localizar o webdriver
+    driver_paths = [
+        ".venv/msedgedriver.exe",
+        "msedgedriver.exe",
+        os.path.join(os.getcwd(), "msedgedriver.exe"),
+    ]
+
+    for driver_path in driver_paths:
+        if os.path.exists(driver_path):
+            print(f"[INFO] Usando msedgedriver local: {driver_path}")
+            try:
+                service = EdgeService(driver_path)
+                driver = webdriver.Edge(service=service, options=options)
+                maximize_window(driver)
+                return driver
+            except Exception as e:
+                print(f"[WARN] Falha ao usar {driver_path}: {e}")
+                continue
+
+    # Fallback: usar driver do sistema PATH
+    try:
+        driver = webdriver.Edge(options=options)
+        maximize_window(driver)
+        return driver
+    except Exception as e:
+        print(f"[ERROR] Falha ao criar WebDriver: {e}")
+        raise RuntimeError(f"Não foi possível iniciar o WebDriver Edge: {e}")
+
+
+def maximize_window(driver: webdriver.Edge):
+    """Maximiza a janela do navegador com tratamento de erro."""
+    try:
+        driver.maximize_window()
+    except Exception:
+        # Silenciosamente ignora falhas de maximização
+        pass
+
+
+# -------------------------------------------------------------------
+# Utilitários de espera e localização
+# -------------------------------------------------------------------
+def wait_for_document_ready(driver: webdriver.Edge, timeout: float):
+    """Aguarda até que o documento esteja completamente carregado."""
+    start_time = time.perf_counter()
+
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
+
+    elapsed = time.perf_counter() - start_time
+    print(f"[TIMER] Document ready: {elapsed:.3f}s")
+
+
+def wait_and_click(driver: webdriver.Edge, xpath: str, timeout: float,
+                   description: str = "") -> Optional[Any]:
+    """Aguarda elemento ficar clicável e clica nele."""
+    label = description or xpath[:50] + "..." if len(xpath) > 50 else xpath
+
+    try:
+        element = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, xpath))
+        )
+        element.click()
+        print(f"[CLICK] {label}")
+        return element
+    except TimeoutException:
+        print(f"[WARN] Timeout ao aguardar elemento: {label}")
+        return None
+
+
+def safe_find_element(driver: webdriver.Edge, xpath: str,
+                      timeout: float) -> Optional[Any]:
+    """
+    Encontra elemento de forma segura com timeout.
+
+    Returns:
+        Elemento encontrado ou None se timeout
+    """
+    try:
+        return WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, xpath))
+        )
+    except TimeoutException:
+        return None
+
+
+def find_visible_element(driver: webdriver.Edge, xpaths: List[str],
+                         timeout: float = 5.0) -> Optional[Any]:
+    """Encontra o primeiro elemento visível entre múltiplos XPaths."""
+    for xpath in xpaths:
+        try:
+            element = WebDriverWait(driver, timeout).until(
+                EC.visibility_of_element_located((By.XPATH, xpath))
+            )
+            return element
+        except TimeoutException:
+            continue
+    return None
+
+
+# -------------------------------------------------------------------
+# Login e autenticação
+# -------------------------------------------------------------------
+def _wait_main_screen(driver: webdriver.Edge, timeout: float) -> bool:
+    """Verifica se a tela principal foi carregada."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.any_of(*[EC.presence_of_element_located((By.XPATH, xp))
+                        for xp in MAIN_SCREEN_INDICATORS])
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def _perform_login(driver: webdriver.Edge, username: str,
+                   password: str, timeout: float) -> bool:
+    """Executa o processo de login com credenciais fornecidas."""
+    # Localiza campo de usuário
+    user_fields = driver.find_elements(
+        By.XPATH, "//input[@type='text' or @type='email' or not(@type)]"
+    )
+    user_field = next((f for f in user_fields if f.is_displayed() and f.is_enabled()), None)
+
+    if user_field:
+        clear_and_send_keys(user_field, username)
+
+    # Localiza campo de senha
+    pwd_field = find_visible_element(
+        driver, ["//input[@type='password' and not(@disabled)]"], timeout=2
+    )
+
+    if pwd_field:
+        clear_and_send_keys(pwd_field, password)
+    else:
+        return False
+
+    # Tenta submeter o formulário
+    return submit_login_form(driver)
+
+
+def clear_and_send_keys(element, text: str):
+    """Limpa campo e insere texto com tratamento de erro."""
+    try:
+        element.clear()
+    except Exception:
+        pass
+    element.send_keys(text)
+
+
+def submit_login_form(driver: webdriver.Edge) -> bool:
+    """Tenta submeter formulário de login por múltiplos métodos."""
+    # Método 1: Botões de submit específicos
+    for xpath in SUBMIT_XPATHS:
+        try:
+            btn = driver.find_element(By.XPATH, xpath)
+            if btn.is_displayed() and btn.is_enabled():
+                btn.click()
+                print(f"[LOGIN] Submit via botão: {xpath}")
+                return True
+        except Exception:
+            continue
+
+    # Método 2: ENTER no campo de senha
+    try:
+        pwd_field = driver.find_element(By.XPATH, "//input[@type='password']")
+        pwd_field.send_keys(Keys.ENTER)
+        print("[LOGIN] Submit via ENTER")
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
+@timeit_decorator()
+def attempt_auto_login(driver: webdriver.Edge, args, timeout: float, url: str) -> bool:
+    """Tenta login automático via keyring ou manual."""
+    print(f"[INFO] Acessando APLAT: {url}")
+    driver.get(url)
+    wait_for_document_ready(driver, timeout)
+
+    # Verifica se já está logado (SSO)
+    if not is_login_required(driver):
+        if _wait_main_screen(driver, timeout):
+            print("[LOGIN] SSO ativo ou já autenticado")
+            return True
+
+    # Tenta login com keyring
+    if try_keyring_login(driver, args, timeout):
+        return True
+
+    # Login manual
+    return manual_login(driver, timeout)
+
+
+def is_login_required(driver: webdriver.Edge) -> bool:
+    """Verifica se campos de login estão visíveis."""
+    try:
+        WebDriverWait(driver, 3).until(
+            EC.visibility_of_element_located(
+                (By.XPATH, "//input[@type='password' and not(@disabled)]")
+            )
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def try_keyring_login(driver: webdriver.Edge, args, timeout: float) -> bool:
+    """Tenta login usando keyring."""
+    try:
+        import keyring
+    except ImportError:
+        return False
+
+    if not (args.use_keyring and args.user):
+        return False
+
+    service = args.keyring_service or "aplat.petrobras"
+    secret = keyring.get_password(service, args.user)
+
+    if not secret:
+        print(f"[WARN] Senha não encontrada no keyring (service='{service}', user='{args.user}').")
+        return False
+
+    print(f"[LOGIN] Tentando login automático para usuário: {args.user}")
+
+    try:
+        if _perform_login(driver, args.user, secret, timeout):
+            # Aguarda transição de tela
+            try:
+                WebDriverWait(driver, 5).until(
+                    EC.staleness_of(driver.find_element(
+                        By.XPATH, "//input[@type='password' and not(@disabled)]"
+                    ))
+                )
+            except Exception:
+                pass
+
+            if _wait_main_screen(driver, max(8, int(timeout))):
+                print("[INFO] Login realizado com sucesso (keyring).")
+                return True
+    except Exception as e:
+        print(f"[WARN] Erro no login automático com keyring: {e}")
+
+    return False
+
+
+def manual_login(driver: webdriver.Edge, timeout: float) -> bool:
+    """Solicita login manual do usuário."""
+    print("[INFO] Verifique se o login foi realizado (SSO / usuário e senha).")
+    print("[INFO] Caso necessário, faça o login manualmente no navegador.")
+
+    try:
+        input("Pressione ENTER aqui no console depois que a tela principal do APLAT estiver aberta...\n")
+    except EOFError:
+        pass
+
+    if _wait_main_screen(driver, timeout):
+        print("[INFO] Login confirmado (manual/automático).")
+        return True
+
+    print("[ERROR] Não foi possível confirmar a tela principal do APLAT após tentativa de login.")
+    return False
+
+
+# -------------------------------------------------------------------
+# Pesquisa e navegação
+# -------------------------------------------------------------------
+@timeit_decorator()
+def perform_search(driver: webdriver.Edge, data_str: str, numero_etapa: str,
+                   timeout: float, search_timeout: float, detail_wait: float):
+    """Executa pesquisa de etapa no APLAT."""
+    print(f"[INFO] Iniciando pesquisa para etapa: {numero_etapa}")
+
+    # Abre opções de pesquisa
+    wait_and_click(driver, XPATH_BTN_EXIBIR_OPCOES, timeout, "Exibir opções")
+
+    # Preenche data
+    fill_field(driver, XPATH_CAMPO_DATA, data_str, timeout, "Campo data")
+
+    # Preenche número da etapa
+    fill_field(driver, XPATH_CAMPO_NUMERO, numero_etapa, timeout, "Campo número etapa")
+
+    # Executa pesquisa
+    wait_and_click(driver, XPATH_BTN_PESQUISAR, timeout, "Pesquisar")
+
+    print(f"[INFO] Aguardando resultados da pesquisa (até {int(search_timeout)}s)...")
+
+    # Aguarda e clica no primeiro resultado
+    click_first_search_result(driver, search_timeout, detail_wait)
+
+
+def fill_field(driver: webdriver.Edge, xpath: str, value: str,
+               timeout: float, field_name: str):
+    """Preenche campo de formulário."""
+    element = WebDriverWait(driver, timeout).until(
+        EC.element_to_be_clickable((By.XPATH, xpath))
+    )
+    clear_and_send_keys(element, value)
+    print(f"[INFO] {field_name} preenchido: {value}")
+
+
+def click_first_search_result(driver: webdriver.Edge, search_timeout: float,
+                              detail_wait: float):
+    """Localiza e clica no primeiro resultado da pesquisa."""
+    start_time = time.perf_counter()
+
+    def find_clickable_result(driver):
+        for xpath in SEARCH_RESULT_XPATHS:
+            elements = driver.find_elements(By.XPATH, xpath)
+            for element in elements:
+                try:
+                    if element.is_displayed() and element.is_enabled():
+                        return element, xpath
+                except StaleElementReferenceException:
+                    continue
+        return None
+
+    # Aguarda resultado
+    result = WebDriverWait(driver, search_timeout).until(find_clickable_result)
+    row, xpath_used = result
+
+    # Clique com retry
+    for attempt in range(3):
+        try:
+            click_element_with_retry(driver, row)
+            break
+        except StaleElementReferenceException:
+            if attempt == 2:
+                raise
+            print("[WARN] Elemento STALE, tentando novamente...")
+            time.sleep(0.5)
+            row = find_clickable_result(driver)[0]
+
+    elapsed = time.perf_counter() - start_time
+    print(f"[INFO] Resultado aberto (XPath: {xpath_used})")
+    print(f"[TIMER] perform_search: {elapsed:.3f}s")
+
+    time.sleep(detail_wait)
+
+
+def click_element_with_retry(driver: webdriver.Edge, element):
+    """Tenta clicar em elemento com múltiplas estratégias."""
+    try:
+        ActionChains(driver).double_click(element).perform()
+    except Exception:
+        try:
+            element.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", element)
+
+
+# -------------------------------------------------------------------
+# Navegação por abas
+# -------------------------------------------------------------------
+@timeit_decorator()
+def goto_tab(driver: webdriver.Edge, tab_label: str, timeout: float):
+    """Navega para uma aba específica."""
+    xpath = f"//ul[contains(@class,'tabAplat')]//a[normalize-space()='{tab_label}']"
+
+    # Verifica se já está na aba ativa
+    if is_tab_active(driver, xpath):
+        print(f"[INFO] Aba '{tab_label}' já está ativa.")
+        return
+
+    # Navega para a aba
+    element = WebDriverWait(driver, timeout).until(
+        EC.element_to_be_clickable((By.XPATH, xpath))
+    )
+    element.click()
+
+    print(f"[CLICK] Navegado para aba: {tab_label}")
+    time.sleep(0.1)
+
+
+def is_tab_active(driver: webdriver.Edge, xpath: str) -> bool:
+    """Verifica se a aba já está ativa."""
+    try:
+        active_tab = driver.find_element(
+            By.XPATH, f"{xpath}/parent::li[contains(@class,'active')]"
+        )
+        return bool(active_tab)
+    except NoSuchElementException:
+        return False
+
+
+# -------------------------------------------------------------------
+# Gerenciamento de modais e popups
+# -------------------------------------------------------------------
+def fechar_modal_etapa(driver: webdriver.Edge, timeout: float):
+    """Fecha modal da etapa se estiver aberto."""
+    try:
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, XPATH_BTN_FECHAR))
+        )
+        btn.click()
+        print("[CLICK] Modal da etapa fechado")
+        time.sleep(0.5)
+    except TimeoutException:
+        print("[WARN] Modal já fechado ou botão não encontrado.")
+
+
+def is_messagebox_open(driver: webdriver.Edge) -> bool:
+    """Verifica se messagebox está aberto."""
+    try:
+        box = driver.find_element(By.XPATH, XPATH_MESSAGEBOX)
+        return box.is_displayed()
+    except Exception:
+        return False
+
+
+def click_messagebox_ok(driver: webdriver.Edge, timeout: float) -> bool:
+    """Fecha messagebox clicando em Ok."""
+    try:
+        btn_ok = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, XPATH_BTN_OK))
+        )
+        btn_ok.click()
+
+        WebDriverWait(driver, timeout).until(
+            EC.invisibility_of_element_located((By.XPATH, XPATH_MESSAGEBOX))
+        )
+        print("[CLICK] MessageBox fechado")
+        return True
+    except TimeoutException:
+        return False
+
+
+def ensure_no_messagebox(driver: webdriver.Edge, timeout: float):
+    """Garante que não há messagebox aberta."""
+    if is_messagebox_open(driver):
+        click_messagebox_ok(driver, timeout)
+
+
+def clicar_botao_confirmar_rodape(driver: webdriver.Edge, timeout: float):
+    """Clica no botão Confirmar no rodapé."""
+    try:
+        ensure_no_messagebox(driver, timeout)
+
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.XPATH, XPATH_BTN_CONFIRMAR))
+        )
+
+        try:
+            btn.click()
+        except ElementClickInterceptedException:
+            ensure_no_messagebox(driver, timeout)
+            driver.execute_script("arguments[0].click();", btn)
+
+        # Verifica se abriu messagebox de confirmação
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.XPATH, XPATH_MESSAGEBOX))
+            )
+            click_messagebox_ok(driver, timeout)
+        except TimeoutException:
+            pass
+
+        time.sleep(0.3)
+        print("[CLICK] Botão Confirmar acionado")
+    except TimeoutException:
+        print("[WARN] Botão 'Confirmar' não encontrado.")
+
+
+def handle_popup_gim_fam(driver: webdriver.Edge, timeout: float) -> bool:
+    """Trata popup específico de GIM/FAM."""
+    try:
+        WebDriverWait(driver, 2).until(
+            EC.visibility_of_element_located((
+                By.XPATH,
+                "//div[contains(@class,'modal-content')]"
+                "//h5[contains(.,'deseja realmente excluir o nº da GIM/FAM')]"
+            ))
+        )
+
+        btn_ok = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.ID, "okButton"))
+        )
+        btn_ok.click()
+
+        WebDriverWait(driver, timeout).until(
+            EC.invisibility_of_element_located((By.ID, "okButton"))
+        )
+
+        print("[CLICK] Popup GIM/FAM tratado")
+        return True
+    except TimeoutException:
+        return False
+
+
+# -------------------------------------------------------------------
+# Context managers para operações comuns
+# -------------------------------------------------------------------
+@contextmanager
+def suppress_stale_reference(max_attempts: int = 3):
+    """
+    Context manager para suprir exceções StaleElementReferenceException
+    com retry automático.
+    """
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            yield
+            break
+        except StaleElementReferenceException:
+            attempt += 1
+            if attempt == max_attempts:
+                raise
+            time.sleep(0.5)
+
+
+# -------------------------------------------------------------------
+# Funções utilitárias avançadas
+# -------------------------------------------------------------------
+def wait_for_element_state(driver: webdriver.Edge, xpath: str,
+                           condition: Callable, timeout: float) -> bool:
+    """Aguarda elemento atingir um estado específico."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: condition(d.find_element(By.XPATH, xpath))
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
+def retry_on_stale(func: Callable, max_retries: int = 3) -> Callable:
+    """Decorator para retry em caso de StaleElementReferenceException."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except StaleElementReferenceException:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+
+    return wrapper
+
+
+
+**********************************************************
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+quent2_plano.py
+
+Geração do plano de trabalho a quente (contexto, QPT, EPI adicional, APN-1, EPI).
+"""
+
+import re
+import unicodedata
+import time
+from typing import Dict, Any, Tuple, List
+
+from selenium.webdriver.common.by import By
+
+
+# -------------------------------------------------------------------
+# Decorator para medição de tempo
+# -------------------------------------------------------------------
+def timeit_decorator(func_name=None):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            start = time.time()
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start
+            name = func_name or func.__name__
+            print(f"[TIMER] {name}: {elapsed:.3f}s")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# -------------------------------------------------------------------
+# Normalização de texto
+# -------------------------------------------------------------------
+def normalizar_texto(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.upper()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+# -------------------------------------------------------------------
+# Coleta de descrição e características da etapa
+# -------------------------------------------------------------------
+@timeit_decorator()
+def coletar_descricao(driver, timeout: float) -> str:
+    from quent1_infra import safe_find_element
+
+    candidatos = [
+        "//app-dados-da-etapa//textarea[contains(@formcontrolname,'descricao')]",
+        "//textarea[contains(@formcontrolname,'descricao')]",
+        "//textarea[@id='descricao']",
+    ]
+    for xp in candidatos:
+        try:
+            el = safe_find_element(driver, xp, timeout)
+            if el:
+                texto = (el.get_attribute("value") or el.text or "").strip()
+                if texto:
+                    print(f"[DEBUG] Descrição obtida usando XPath: {xp}")
+                    return texto
+        except Exception:
+            continue
+    print("[WARN] Não foi possível localizar a Descrição da Etapa pelos XPaths padrão.")
+    return ""
+
+
+@timeit_decorator()
+def coletar_caracteristicas_trabalho(driver, timeout: float) -> str:
+    """Coleta as características do trabalho da etapa."""
+    from quent1_infra import safe_find_element
+
+    caracteristicas_lista: List[str] = []
+
+    # Método 1: spans com classe 'nomecaracteristica'
+    try:
+        elementos = driver.find_elements(
+            By.XPATH, "//app-input-caracteristicas//span[@class='nomecaracteristica']"
+        )
+        for elem in elementos:
+            texto = elem.text.strip()
+            if texto and texto not in caracteristicas_lista:
+                caracteristicas_lista.append(texto)
+
+        if caracteristicas_lista:
+            resultado = ", ".join(caracteristicas_lista)
+            print(f"[DEBUG] Características encontradas (Método 1): {resultado}")
+            return resultado
+    except Exception as e:
+        print(f"[DEBUG] Falha no método 1: {e}")
+
+    # Método 2: fieldset "Características do trabalho"
+    try:
+        fieldset = safe_find_element(
+            driver,
+            "//fieldset[contains(.//legend, 'Características do trabalho')]",
+            timeout,
+        )
+        if fieldset:
+            texto = fieldset.text
+            linhas = texto.split("\n")
+            for linha in linhas:
+                linha = linha.strip()
+                if not linha or "Características do trabalho" in linha:
+                    continue
+                if linha and linha not in caracteristicas_lista:
+                    caracteristicas_lista.append(linha)
+
+            if caracteristicas_lista:
+                resultado = ", ".join(caracteristicas_lista)
+                print(f"[DEBUG] Características encontradas (Método 2): {resultado}")
+                return resultado
+    except Exception as e:
+        print(f"[DEBUG] Falha no método 2: {e}")
+
+    # Método 3: regex no texto completo (fallback)
+    try:
+        bloco = safe_find_element(driver, "//app-dados-da-etapa", timeout)
+        if bloco:
+            texto_completo = bloco.text.strip()
+            padrao = (
+                r"Características do trabalho\s*-\s*(.*?)(?=\n\s*\n|\n[A-ZÀ-Ú][a-zà-ú]|$)"
+            )
+            match = re.search(padrao, texto_completo, re.DOTALL | re.IGNORECASE)
+            if match:
+                caracteristicas = match.group(1).strip()
+                caracteristicas = re.sub(
+                    r"[\u25b6\u25c0\u25b2\u25bc]", "", caracteristicas
+                ).strip()
+                linhas = [
+                    linha.strip()
+                    for linha in caracteristicas.split("\n")
+                    if linha.strip()
+                ]
+                resultado = ", ".join(linhas)
+                print(
+                    f"[DEBUG] Características extraídas via regex: '{resultado}'"
+                )
+                return resultado
+    except Exception as e:
+        print(f"[WARN] Não foi possível localizar 'Características do trabalho': {e}")
+
+    return ""
+
+
+# -------------------------------------------------------------------
+# Montagem de contexto a partir dos textos
+# -------------------------------------------------------------------
+def montar_contexto_from_textos(
+    descricao: str, caracteristicas: str
+) -> Dict[str, Any]:
+    desc = normalizar_texto(descricao or "")
+    carac = normalizar_texto(caracteristicas or "")
+    texto = f"{desc} {carac}".strip()
+
+    ctx: Dict[str, Any] = {}
+    ctx["texto_full"] = texto
+
+    # **CORREÇÃO: Melhorar detecção de ESPAÇO CONFINADO**
+    ctx["tem_espaco_confinado"] = any(
+        frase in texto
+        for frase in (
+            "ESPACO CONFINADO",
+            "INTERIOR DE ESPACO",
+            "ESPACO CONFINADO -",
+            "DENTRO DE",
+            "INTERIOR DO",
+        )
+    ) or "ESPACO CONFINADO" in texto
+
+    # **CORREÇÃO: Melhorar detecção de ALTURA**
+    ctx["tem_altura"] = any(
+        frase in texto
+        for frase in (
+            "ALTURA",
+            "ACESSO POR CORDAS",
+            "CORDAS",
+            "NR-35",
+            "TRABALHO EM ALTURA",
+        )
+    ) or "ALTURA" in texto
+
+    # Restante das flags mantidas
+    ctx["tem_acesso_cordas"] = "ACESSO POR CORDAS" in texto
+    ctx["tem_sobre_o_mar"] = "SOBRE O MAR" in texto
+    ctx["tem_chama"] = any(
+        ch in texto for ch in ("CHAMA ABERTA", "ESMERILHADEIRA", "OXICORTE", "SOLDA")
+    )
+    ctx["tem_oxicorte"] = "OXICORTE" in texto
+    ctx["tem_solda"] = bool(re.search(r"\bSOLDA\b", texto))
+    ctx["tem_co2"] = any(
+        frase in texto
+        for frase in (
+            "AMBIENTES PROTEGIDOS POR CO2",
+            "PROTEGIDO POR SISTEMA DE CO2",
+            "PROTEGIDOS POR CO2",
+            "PROTEGIDO POR CO2",
+        )
+    )
+    ctx["tem_trat_mec"] = "TRATAMENTO MECANICO" in texto
+    ctx["tem_agulheiro"] = "AGULHEIRO" in texto
+    ctx["tem_lix_pneum"] = "LIXADEIRA PNEUMATIC" in texto
+    ctx["tem_lixadeira"] = "LIXADEIRA" in texto
+    ctx["tem_pneumatico"] = "PNEUMATIC" in texto
+    ctx["tem_eletrico"] = "ELETRIC" in texto
+    ctx["tem_corte"] = bool(re.search(r"\bCORTE\b", texto))
+    ctx["tem_serra_sabre"] = "SERRA SABRE" in texto
+    ctx["tem_pressurizado"] = "PRESSURIZADO" in texto
+    ctx["tem_hidrojato"] = ("HIDROJATO" in texto) or ("HIDROJATEAMENTO" in texto)
+    ctx["tem_partes_moveis"] = "PARTES MOVEIS" in texto
+
+    return ctx
+
+
+# -------------------------------------------------------------------
+# Bases de EPI adicional (radios), EPIs por categoria e QPT
+# -------------------------------------------------------------------
+EPI_Q001_CINTO = ("Q001", "Cinto de Segurança")
+EPI_Q002_VENT = ("Q002", "Ventilação Forçada")
+EPI_Q003_COLETE = ("Q003", "Colete Salva-vidas")
+EPI_Q004_ILUM = ("Q004", "Iluminação p/ uso em área classificada (tipo Ex)")
+EPI_Q005_DPA = ("Q005", "Dupla Proteção Auricular")
+EPI_Q006_PROT_FACIAL = ("Q006", "Protetor Facial")
+
+EPI_RADIOS_BASE: Dict[Tuple[str, str], str] = {
+    EPI_Q001_CINTO: "Não",
+    EPI_Q002_VENT: "Não",
+    EPI_Q003_COLETE: "Não",
+    EPI_Q004_ILUM: "Não",
+    EPI_Q005_DPA: "Sim",
+    EPI_Q006_PROT_FACIAL: "Sim",
+}
+
+EPIS_CAT_BASE: Dict[str, set] = {
+    "Luvas": {
+        "LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')",
+    },
+    "Proteção Respiratória": {
+        "NÃO APLICÁVEL",
+    },
+    "Vestimentas": {
+        "DUPLA PROTEÇÃO AUDITIVA",
+        "EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)",
+    },
+    "Óculos": {
+        "ÓCULOS AMPLA VISÃO",
+        "PROTETOR FACIAL",
+    },
+}
+
+QPT_Q001_MUDANCA = (
+    "Q001",
+    "O trabalho a ser realizado é caracterizado como uma mudança?",
+)
+QPT_Q001_PERMANENCIA = (
+    "Q001",
+    "Permanência do Operador no Local de Trabalho?",
+)
+
+QPT_Q002_ACOMP = (
+    "Q002",
+    "Acompanhamento Periódico? (Em caso de Acompanhamento Periódico, efetuar verificações de ____em___horas)",
+)
+QPT_Q002_MANOBRAS = (
+    "Q002",
+    "As manobras, bloqueios e isolamentos foram executados conforme o plano de isolamento?",
+)
+
+QPT_Q003_DRENADO = (
+    "Q003",
+    "O equipamento foi drenado e/ou lavado e/ou limpo e/ou ventilado ?",
+)
+
+QPT_Q004_SINALIZADO = (
+    "Q004",
+    "O equipamento está corretamente sinalizado com etiquetas de advertência ?",
+)
+
+QPT_Q005_INSPECOES = (
+    "Q005",
+    "Foram realizadas inspeções prévias nos equipamentos elétricos (luminárias, quadros, painéis, conexões, cabos, etc) e os cabos elétricos estão supensos?",
+)
+
+QPT_Q006_COMB_INC = (
+    "Q006",
+    "Caso os sistemas e equipamentos de combate a incêndio do local onde será executado o trabalho não estejam em condições normais de operação, foram definidas salvaguardas?",
+)
+
+QPT_Q007_MANG_AR = (
+    "Q007",
+    "As mangueiras de ar comprimido possuem engates rápidos compatíveis e os mesmos estão travados",
+)
+
+QPT_Q008_LOCAL_ISOLADO = (
+    "Q008",
+    "O local foi isolado, sinalizado e o pessoal desnecessário  afastado ?",
+)
+
+QPT_Q009_FAGULHAS = (
+    "Q009",
+    "Foi providenciada a contenção de fagulhas com mantas e materiais adequados?",
+)
+
+QPT_Q010_ACOPLADO = (
+    "Q010",
+    "Caso o equipamento esteja acoplado a equipamento elétrico (ex: motor elétrico),  foram tomadas precauções quanto à energização acidental do equipamento ?",
+)
+
+QPT_Q011_TAMPONAMENTOS = (
+    "Q011",
+    "Foi providenciado Tamponamentos de drenos, ralos, vents e outras aberturas próximas ao local do trabalho?",
+)
+
+QPT_Q012_RISCO_PP = (
+    "Q012",
+    "A execução deste trabalho pode causar Risco de Perda de Produção?",
+)
+
+QPT_Q013_INIBIR_SENSORES = (
+    "Q013",
+    "Caso necessário inibir sensores do sistema de detecção de fogo e gás, foram definidas salvaguardas para suprir a inibição?",
+)
+
+QPT_Q014_OBSERVADOR = (
+    "Q014",
+    "O observador foi instruído quanto a utilização dos equipamentos de combate a incêndio?",
+)
+
+QPT_BASE: Dict[Tuple[str, str], str] = {
+    QPT_Q001_MUDANCA: "Não",
+    QPT_Q001_PERMANENCIA: "Não",
+    QPT_Q002_ACOMP: "Sim",
+    QPT_Q002_MANOBRAS: "NA",
+    QPT_Q003_DRENADO: "NA",
+    QPT_Q004_SINALIZADO: "NA",
+    QPT_Q005_INSPECOES: "NA",
+    QPT_Q006_COMB_INC: "NA",
+    QPT_Q007_MANG_AR: "NA",
+    QPT_Q008_LOCAL_ISOLADO: "Sim",
+    QPT_Q009_FAGULHAS: "NA",
+    QPT_Q010_ACOPLADO: "NA",
+    QPT_Q011_TAMPONAMENTOS: "NA",
+    QPT_Q012_RISCO_PP: "Não",
+    QPT_Q013_INIBIR_SENSORES: "NA",
+    QPT_Q014_OBSERVADOR: "NA",
+}
+
+
+# -------------------------------------------------------------------
+# Montagem das bases específicas
+# -------------------------------------------------------------------
+def montar_base_epi_radios(ctx: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
+    base = dict(EPI_RADIOS_BASE)
+
+    if ctx.get("tem_altura") or ctx.get("tem_acesso_cordas") or ctx.get("tem_sobre_o_mar"):
+        base[EPI_Q001_CINTO] = "Sim"
+
+    if ctx.get("tem_sobre_o_mar"):
+        base[EPI_Q003_COLETE] = "Sim"
+
+    hazard_olhos = (
+        ctx.get("tem_chama")
+        or ctx.get("tem_trat_mec")
+        or ctx.get("tem_agulheiro")
+        or ctx.get("tem_lix_pneum")
+        or ctx.get("tem_lixadeira")
+        or ctx.get("tem_corte")
+        or ctx.get("tem_serra_sabre")
+    )
+    base[EPI_Q006_PROT_FACIAL] = "Sim" if hazard_olhos else "Não"
+
+    return base
+
+
+def montar_base_epis_cat(ctx: Dict[str, Any]) -> Dict[str, set]:
+    base: Dict[str, set] = {cat: set(itens) for cat, itens in EPIS_CAT_BASE.items()}
+
+    hazard_olhos = (
+        ctx.get("tem_chama")
+        or ctx.get("tem_trat_mec")
+        or ctx.get("tem_agulheiro")
+        or ctx.get("tem_lix_pneum")
+        or ctx.get("tem_lixadeira")
+        or ctx.get("tem_corte")
+        or ctx.get("tem_serra_sabre")
+    )
+
+    if not hazard_olhos:
+        base["Óculos"] = {"ÓCULOS SEGURANÇA CONTRA IMPACTO"}
+
+    if ctx.get("tem_chama"):
+        base.setdefault("Luvas", set()).update(
+            {
+                "LUVA ARAMIDA",
+                "LUVA DE RASPA",
+            }
+        )
+        base.setdefault("Vestimentas", set()).update(
+            {
+                "BALACLAVA",
+                "AVENTAL DE RASPA",
+                "CAPUZ",
+                "MANGA DE RASPA",
+                "PERNEIRA DE RASPA",
+                "VESTIM. COMPLETA DE RASPA",
+            }
+        )
+        base["Proteção Respiratória"] = {"PEÇA SEMI-FACIAL FILTRANTE 2"}
+        base.setdefault("Óculos", set()).add("MÁSCARA SOLDADOR")
+
+    if ctx.get("tem_solda") or ctx.get("tem_oxicorte"):
+        base.setdefault("Óculos", set()).add(
+            "LENTE DE ACORDO COM AMPERAGEM DA MÁQUINA"
+        )
+    if ctx.get("tem_oxicorte"):
+        base.setdefault("Óculos", set()).add("ÓCULOS MAÇARIQUEIRO")
+
+    if ctx.get("tem_trat_mec") or ctx.get("tem_agulheiro") or ctx.get("tem_lix_pneum"):
+        base["Proteção Respiratória"] = {"PEÇA SEMI-FACIAL FILTRANTE 2"}
+        base.setdefault("Luvas", set()).add("LUVA ANTI-VIBRAÇÃO")
+
+    if ctx.get("tem_altura") or ctx.get("tem_acesso_cordas"):
+        base.setdefault("Vestimentas", set()).update(
+            {
+                "BOTA CANO ALTO",
+                "CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y",
+                "CINTO DE SEG. TP PARA-QUEDISTA",
+                "CINTO DE SEGURANÇA PARA RESGATE",
+                "DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA",
+                "MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS",
+            }
+        )
+
+    if ctx.get("tem_sobre_o_mar"):
+        base.setdefault("Vestimentas", set()).update(
+            {
+                "BOTA CANO ALTO",
+                "CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y",
+                "CINTO DE SEG. TP PARA-QUEDISTA",
+                "CINTO DE SEGURANÇA PARA RESGATE",
+                "COLETE SALVA VIDAS RF (apenas para trabalhos a quente)",
+                "COLETE SALVA-VIDAS",
+                "DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA",
+                "MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS",
+            }
+        )
+
+    return base
+
+
+def montar_base_qpt(ctx: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
+    base = dict(QPT_BASE)
+
+    if ctx.get("tem_chama") or ctx.get("tem_eletrico"):
+        base[QPT_Q005_INSPECOES] = "Sim"
+    else:
+        base[QPT_Q005_INSPECOES] = "NA"
+
+    if (
+        ctx.get("tem_pneumatico")
+        or ctx.get("tem_trat_mec")
+        or ctx.get("tem_agulheiro")
+        or ctx.get("tem_lix_pneum")
+    ):
+        base[QPT_Q007_MANG_AR] = "Sim"
+    else:
+        base[QPT_Q007_MANG_AR] = "NA"
+
+    if ctx.get("tem_chama"):
+        base[QPT_Q009_FAGULHAS] = "Sim"
+    else:
+        base[QPT_Q009_FAGULHAS] = "NA"
+
+    if ctx.get("tem_chama"):
+        base[QPT_Q011_TAMPONAMENTOS] = "Sim"
+    else:
+        base[QPT_Q011_TAMPONAMENTOS] = "NA"
+
+    if ctx.get("tem_co2") and ctx.get("tem_chama"):
+        base[QPT_Q013_INIBIR_SENSORES] = "Sim"
+    else:
+        base[QPT_Q013_INIBIR_SENSORES] = "NA"
+
+    if ctx.get("tem_chama"):
+        base[QPT_Q014_OBSERVADOR] = "Sim"
+    else:
+        base[QPT_Q014_OBSERVADOR] = "NA"
+
+    return base
+
+
+def montar_base_apn1(ctx: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Base APN-1 corrigida para considerar ESPAÇO CONFINADO e ALTURA.
+    """
+    base = {f"Q{num:03d}": "Não" for num in range(1, 21)}
+
+    # **CORREÇÃO: Espaço confinado → Q006**
+    if ctx.get("tem_espaco_confinado"):
+        base["Q006"] = "Sim"
+
+    # **CORREÇÃO: Altura ou acesso por cordas → Q007**
+    if ctx.get("tem_altura") or ctx.get("tem_acesso_cordas"):
+        base["Q007"] = "Sim"
+
+    # Sobre o mar → Q008
+    if ctx.get("tem_sobre_o_mar"):
+        base["Q008"] = "Sim"
+
+    # Chama aberta → Q010
+    if ctx.get("tem_chama"):
+        base["Q010"] = "Sim"
+
+    # CO2 → Q019
+    if ctx.get("tem_co2"):
+        base["Q019"] = "Sim"
+
+    # Pressurizado → Q013
+    if ctx.get("tem_pressurizado"):
+        base["Q013"] = "Sim"
+
+    # Hidrojato → Q016
+    if ctx.get("tem_hidrojato"):
+        base["Q016"] = "Sim"
+
+    # Partes móveis → Q017
+    if ctx.get("tem_partes_moveis"):
+        base["Q017"] = "Sim"
+
+    return base
+
+
+# -------------------------------------------------------------------
+# Geração do plano e relatório
+# -------------------------------------------------------------------
+def gerar_plano_trabalho_quente(
+    descricao: str, caracteristicas: str
+) -> Dict[str, Any]:
+    ctx = montar_contexto_from_textos(descricao, caracteristicas)
+
+    base_epi_radios = montar_base_epi_radios(ctx)
+    base_epis_cat = montar_base_epis_cat(ctx)
+    base_qpt = montar_base_qpt(ctx)
+    base_apn1 = montar_base_apn1(ctx)
+
+    plano = {
+        "contexto": ctx,
+        "epi_radios": base_epi_radios,
+        "epis_cat": base_epis_cat,
+        "qpt": base_qpt,
+        "apn1": base_apn1,
+        "analise_ambiental": "Todas as questões devem ser respondidas com 'Não' (regra fixa).",
+    }
+    return plano
+
+
+def imprimir_relatorio_plano(
+    numero_etapa: str,
+    data_str: str,
+    tipo_trabalho_txt: str,
+    descricao: str,
+    caracteristicas: str,
+    plano: Dict[str, Any],
+):
+    print("\n" + "-" * 80)
+    print(
+        f"[PLANO] Etapa {numero_etapa} | Data: {data_str} | Tipo de Trabalho: {tipo_trabalho_txt}"
+    )
+    print("-" * 80)
+
+    print(f"[INFO] Descrição (len={len(descricao)}):")
+    print(f"       {descricao}")
+    print(f"[INFO] Características do trabalho / Observações:")
+    print(f"       {caracteristicas}")
+
+    ctx = plano["contexto"]
+    flags_true = [k for k, v in ctx.items() if k.startswith("tem_") and v]
+    print("\n[CONTEXTOS DETECTADOS]")
+    if flags_true:
+        for f in sorted(flags_true):
+            print(f"  - {f} = True")
+    else:
+        print("  (nenhum gatilho específico detectado)")
+
+    print("\n[EPI (RÁDIOS PRINCIPAIS) – PLANO ESPERADO]")
+    epi_radios = plano["epi_radios"]
+    for (codigo, texto), resp in sorted(epi_radios.items(), key=lambda x: x[0]):
+        print(f"  {codigo}: resp='{resp}' | {texto}")
+
+    print("\n[EPIs VINCULADOS POR CATEGORIA – PLANO ESPERADO]")
+    epis_cat: Dict[str, set] = plano["epis_cat"]
+    for cat in sorted(epis_cat.keys()):
+        itens = sorted(epis_cat[cat])
+        print(f"  Categoria: {cat}")
+        if itens:
+            for item in itens:
+                print(f"    - {item}")
+        else:
+            print("    (nenhum EPI esperado para esta categoria)")
+
+    print("\n[QUESTIONÁRIO PT – PLANO ESPERADO]")
+    qpt = plano["qpt"]
+    for (codigo, texto), resp in sorted(qpt.items(), key=lambda x: x[0]):
+        print(f"  {codigo}: resp='{resp}' | {texto}")
+
+    print("\n[APN-1 – PLANO ESPERADO]")
+    apn1 = plano["apn1"]
+    sims = {k: v for k, v in apn1.items() if v == "Sim"}
+    if sims:
+        print("  Questões com resposta 'Sim':")
+        for codigo in sorted(sims.keys()):
+            print(f"    {codigo}: 'Sim'")
+    else:
+        print("  (nenhuma questão com 'Sim'; todas permanecem 'Não')")
+
+    print("  Questões com resposta 'Não':")
+    for codigo in sorted(apn1.keys()):
+        if apn1[codigo] == "Não":
+            print(f"    {codigo}: 'Não'")
+
+    print("\n[ANÁLISE AMBIENTAL – PLANO ESPERADO]")
+    print("  Todas as questões devem ser respondidas com 'Não' (regra fixa para Trabalho a Quente).")
+    print("-" * 80 + "\n")
+
+
+
+
+*******************************************************************
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+quent3_preenchimento.py
+Rotinas de preenchimento automático:
+- Questionário PT
+- EPI adicional necessário e proteções
+- Análise ambiental
+- APN-1 (dinâmico por texto, até 20 questões, numeração variável)
+"""
+
+import time
+import re
+import unicodedata
+from typing import Dict, Tuple, Any, List, Optional, Set
+from functools import wraps, lru_cache
+from collections import defaultdict
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
+
+from quent1_infra import goto_tab, safe_find_element, wait_for_document_ready
+from quent2_plano import normalizar_texto
+
+# -------------------------------------------------------------------
+# Constantes e configurações
+# -------------------------------------------------------------------
+# XPATHS para containers e elementos comuns
+XPATH_CONTAINER_EPI = "//app-epi-da-etapa//section[@id='questionario']//div[@id='EPI']"
+XPATH_ANALISE_AMBIENTAL = "//div[@id='AMB' or .//h4[contains(.,'O local de trabalho tem:')]]"
+XPATH_APN1_ROWS = [
+    "//div[@id='APN1']//div[contains(@class,'row') and starts-with(@id,'questao_')]",
+    "//app-apn1//div[contains(@class,'row') and starts-with(@id,'questao_')]",
+    "//div[contains(@class,'row') and starts-with(@id,'questao_')]",
+]
+
+# Padrões para análise de texto
+PADROES_ALTURA = frozenset([
+    "ALTURA", "2 METROS", "2M", "TRABALHO EM ALTURA", "ELEVADO", "ACESSO POR CORDAS"
+])
+
+PADROES_CHAMA = frozenset([
+    "CHAMA ABERTA", "SOLDA", "OXICORTE", "ESMERILHADEIRA", "TRABALHO A QUENTE", "CHAMA"
+])
+
+PADROES_CO2 = frozenset([
+    "PROTEGIDO POR CO2", "PROTEGIDOS POR CO2",
+    "PROTEGIDO POR SISTEMA DE CO2", "AMBIENTES PROTEGIDOS POR CO2"
+])
+
+PADROES_PRESSURIZADO = frozenset([
+    "PRESSURIZADO", "PRESSÃO", "PRESSAO TRAPEADA", "PRESSAO TRAP"
+])
+
+PADROES_HIDROJATO = frozenset([
+    "HIDROJATO", "HIDROJATEAMENTO", "JATEAMENTO"
+])
+
+# Flag global de dry-run para EPI adicional (não clicar, só logar)
+DEBUG_EPI_DRY_RUN = False
+
+
+# -------------------------------------------------------------------
+# Decorator para medição de tempo otimizado
+# -------------------------------------------------------------------
+def timeit_decorator(func_name: Optional[str] = None):
+    """Decorator para medição de tempo de execução."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            name = func_name or func.__name__
+            print(f"[TIMER] {name}: {elapsed:.3f}s")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# -------------------------------------------------------------------
+# Utilitários de normalização e cache
+# -------------------------------------------------------------------
+@lru_cache(maxsize=512)
+def normalizar_string(texto: str) -> str:
+    """Normaliza string para comparação: remove acentos, uppercase, espaços."""
+    if not texto:
+        return ""
+
+    # Remove acentos
+    texto = ''.join(c for c in unicodedata.normalize('NFD', texto)
+                    if unicodedata.category(c) != 'Mn')
+
+    # Converte para maiúsculas e remove espaços extras
+    texto = texto.upper()
+    texto = re.sub(r'\s+', ' ', texto).strip()
+
+    return texto
+
+
+def extrair_digitos_codigo(codigo: str) -> str:
+    """Extrai apenas dígitos de um código e padroniza como '001', '002', etc."""
+    if not codigo:
+        return ""
+
+    digitos = ''.join(c for c in str(codigo) if c.isdigit())
+    return digitos.zfill(3) if digitos else ""
+
+
+# Pergunta específica: "O trabalho a ser realizado é caracterizado como uma mudança?"
+TEXTO_MUDANCA_QPT = normalizar_string(
+    "O trabalho a ser realizado é caracterizado como uma mudança?"
+)
+
+
+# -------------------------------------------------------------------
+# Questionário PT - Módulo otimizado
+# -------------------------------------------------------------------
+class QuestionarioPTProcessor:
+    """Processador otimizado para Questionário PT."""
+
+    def __init__(self, driver, timeout: float):
+        self.driver = driver
+        self.timeout = timeout
+        self.question_map = None
+
+    @timeit_decorator()
+    def preencher(self, qpt_plano: Dict[Tuple[str, str], str]) -> Tuple[int, int]:
+        """Preenche Questionário PT baseado no plano fornecido."""
+        print("[STEP] Preenchendo aba 'Questionário PT'...")
+        goto_tab(self.driver, "Questionário PT", self.timeout)
+
+        # Aguarda carregamento da aba/questionário
+        try:
+            wait_for_document_ready(self.driver, self.timeout)
+        except Exception as e:
+            print(f"[WARN] wait_for_document_ready falhou na aba QPT: {e}")
+
+        try:
+            WebDriverWait(self.driver, self.timeout).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//div[contains(@class,'row') and starts-with(@id,'questao_')]")
+                )
+            )
+        except TimeoutException:
+            print("[WARN] Nenhuma linha de questão encontrada na aba QPT após o timeout")
+
+        time.sleep(0.2)
+
+        self._construir_mapa_perguntas()
+        sucessos, total = self._processar_questoes(qpt_plano)
+
+        # Clica em Confirmar para salvar o Questionário PT
+        self._clicar_confirmar_qpt()
+
+        return sucessos, total
+
+    def _construir_mapa_perguntas(self):
+        """Constrói mapa de perguntas da tela."""
+        rows = self.driver.find_elements(
+            By.XPATH, "//div[contains(@class,'row') and starts-with(@id,'questao_')]"
+        )
+
+        mapa_codigo = {}
+        mapa_texto = defaultdict(list)
+
+        for row in rows:
+            info = self._extrair_info_pergunta(row)
+            if info:
+                chave_codigo = (info['cod_norm'], info['texto_norm'])
+                mapa_codigo[chave_codigo] = info
+                mapa_texto[info['texto_norm']].append(info)
+
+        self.question_map = {
+            'by_code': mapa_codigo,
+            'by_text': dict(mapa_texto),
+        }
+
+    def _extrair_info_pergunta(self, row) -> Optional[dict]:
+        """Extrai informações de uma pergunta individual."""
+        try:
+            ordem_elem = row.find_element(By.CSS_SELECTOR, ".ordem")
+            pergunta_elem = row.find_element(By.CSS_SELECTOR, ".pergunta")
+        except NoSuchElementException:
+            return None
+
+        cod_raw = ordem_elem.text or ""
+        texto_raw = pergunta_elem.text or ""
+
+        cod_norm = extrair_digitos_codigo(cod_raw)
+        texto_norm = normalizar_string(texto_raw)
+
+        if not texto_norm:
+            return None
+
+        return {
+            'row': row,
+            'ordem': cod_raw.strip(),
+            'texto': texto_raw.strip(),
+            'cod_norm': cod_norm,
+            'texto_norm': texto_norm,
+        }
+
+    def _processar_questoes(self, qpt_plano: Dict[Tuple[str, str], str]) -> Tuple[int, int]:
+        """Processa todas as questões do plano."""
+        total_processadas = 0
+        sucessos = 0
+
+        for (codigo, texto), resposta in qpt_plano.items():
+            if resposta is None:
+                continue
+
+            resposta_str = str(resposta).strip()
+            if not resposta_str:
+                continue
+
+            total_processadas += 1
+
+            if self._processar_questao_individual(codigo, texto, resposta_str):
+                sucessos += 1
+
+        self._log_resultado(total_processadas, sucessos)
+        return sucessos, total_processadas
+
+    def _processar_questao_individual(self, codigo: str, texto: str, resposta: str) -> bool:
+        """Processa uma questão individual."""
+        info = self._encontrar_questao(codigo, texto)
+        if not info:
+            print(f"[WARN] Questão não encontrada: código='{codigo}', texto='{texto}'")
+            return False
+
+        print(f"[INFO] Respondendo Q{info['ordem']}: '{info['texto'][:70]}...' com '{resposta}'")
+
+        resposta_norm = normalizar_string(resposta)
+        sucesso = self._marcar_resposta(info['row'], resposta)
+
+        # Se for a pergunta de "mudança" e a resposta for NÃO, tratar o popup de confirmação
+        try:
+            if sucesso and self._eh_pergunta_mudanca(info) and resposta_norm in ("NAO", "NÃO", "NO", "N"):
+                self._lidar_popup_mudanca()
+        except Exception as e:
+            print(f"[WARN] Erro ao tratar popup de Mudança: {e}")
+
+        return sucesso
+
+    def _eh_pergunta_mudanca(self, info: dict) -> bool:
+        """Detecta se a questão é a pergunta de 'Mudança' do Questionário PT."""
+        texto_norm = info.get("texto_norm") or normalizar_string(info.get("texto", ""))
+        if not texto_norm:
+            return False
+        return TEXTO_MUDANCA_QPT in texto_norm
+
+    def _lidar_popup_mudanca(self):
+        """
+        Trata o popup que aparece ao marcar 'Não' na pergunta:
+        'O trabalho a ser realizado é caracterizado como uma mudança?'.
+
+        Estratégia:
+        - Após marcar 'Não', aguarda 1 segundo.
+        - Tenta localizar o botão "Sim" do popup:
+            /html/body/app-root/div/app-confirm-dialog/div/div/div/div[3]/div/button[1]
+          ou pelo id="okButton".
+        - Clica em "Sim" e segue o fluxo normal.
+        """
+        try:
+            # Espera fixa de 1 segundo após marcar "Não"
+            time.sleep(1.0)
+
+            # Espera curta para o botão ficar clicável
+            wait = WebDriverWait(self.driver, 1.0)
+
+            botao_sim = None
+            locators = [
+                # 1) Pelo ID (mais robusto)
+                (By.ID, "okButton"),
+                # 2) Pelo XPATH absoluto informado
+                (By.XPATH, "/html/body/app-root/div/app-confirm-dialog/div/div/div/div[3]/div/button[1]"),
+            ]
+
+            for by, selector in locators:
+                try:
+                    botao_sim = wait.until(
+                        EC.element_to_be_clickable((by, selector))
+                    )
+                    if botao_sim:
+                        break
+                except TimeoutException:
+                    botao_sim = None
+                    continue
+
+            if not botao_sim:
+                print("[WARN] Popup de Mudança: botão 'Sim' não encontrado dentro de 1s.")
+                return
+
+            # Garante que o botão esteja visível na tela e clica
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
+                botao_sim,
+            )
+            time.sleep(0.1)
+            botao_sim.click()
+            print("[CLICK] Botão 'Sim' do popup de Mudança clicado")
+
+        except TimeoutException:
+            print("[WARN] Popup de Mudança não apareceu dentro do tempo limite.")
+        except Exception as e:
+            print(f"[WARN] Erro ao tentar clicar em 'Sim' no popup de Mudança: {e}")
+
+    def _clicar_confirmar_qpt(self):
+        """Clica no botão 'Confirmar' do Questionário PT e trata modais."""
+        try:
+            wait = WebDriverWait(self.driver, self.timeout)
+            btn = wait.until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//app-botoes-etapa//button[normalize-space()='Confirmar']")
+                )
+            )
+
+            # **ADICIONAR: Fechar modais antes de clicar**
+            from quent1_infra import ensure_no_messagebox
+            ensure_no_messagebox(self.driver, 2)
+
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
+                btn,
+            )
+            time.sleep(0.1)
+            btn.click()
+            print("[CLICK] Botão 'Confirmar' do Questionário PT acionado")
+
+            # **ADICIONAR: Aguardar e fechar possíveis modais após clique**
+            time.sleep(1)
+            ensure_no_messagebox(self.driver, 3)
+
+        except TimeoutException:
+            print("[WARN] Botão 'Confirmar' do Questionário PT não encontrado/visível")
+        except Exception as e:
+            print(f"[WARN] Erro ao clicar em 'Confirmar' no Questionário PT: {e}")
+
+    def _encontrar_questao(self, codigo: str, texto: str) -> Optional[dict]:
+        """Encontra questão usando código e texto."""
+        cod_norm = extrair_digitos_codigo(codigo)
+        texto_norm = normalizar_string(texto)
+
+        # Busca por código e texto
+        if self.question_map['by_code']:
+            info = self.question_map['by_code'].get((cod_norm, texto_norm))
+            if info:
+                return info
+
+        # Fallback: busca apenas por texto
+        if texto_norm in self.question_map['by_text']:
+            candidatos = self.question_map['by_text'][texto_norm]
+            if candidatos:
+                if len(candidatos) > 1:
+                    print(f"[WARN] Múltiplas questões para texto '{texto}'")
+                return candidatos[0]
+
+        return None
+
+    def _marcar_resposta(self, row, resposta: str) -> bool:
+        """Marca resposta em uma linha específica do Questionário PT."""
+        resposta_original = str(resposta).strip()
+        resposta_norm = normalizar_string(resposta_original)
+
+        # Mapeia respostas possíveis para consistência
+        if resposta_norm in ["SIM", "S", "YES", "Y"]:
+            alvo = "Sim"
+        elif resposta_norm in ["NAO", "NÃO", "N", "NO"]:
+            alvo = "Não"
+        elif resposta_norm in ["NA", "N/A", "NÃO APLICÁVEL", "NÃO SE APLICA"]:
+            alvo = "NA"
+        else:
+            alvo = resposta_original  # Fallback
+
+        print(f"[DEBUG] Marcando resposta: '{resposta_original}' -> normalizada: '{resposta_norm}' -> alvo: '{alvo}'")
+
+        try:
+            container = row.find_element(By.CSS_SELECTOR, ".resposta")
+        except NoSuchElementException:
+            print("[WARN] Container de resposta (.resposta) não encontrado")
+            return False
+
+        # Procura todos os spans de opção de resposta
+        spans_opcoes = container.find_elements(By.XPATH, ".//span[.//input[@type='radio']]")
+        print(f"[DEBUG] Encontrados {len(spans_opcoes)} spans de opções")
+
+        # Tenta encontrar e marcar a opção correta
+        for span in spans_opcoes:
+            try:
+                # Encontra o label dentro do span
+                label = span.find_element(By.TAG_NAME, "label")
+                texto_label = label.text.strip() if label.text else ""
+
+                print(f"[DEBUG] Opção encontrada: '{texto_label}'")
+
+                # Verifica se este é o label que queremos (comparação flexível)
+                if self._texto_label_corresponde(texto_label, alvo):
+                    try:
+                        # Tenta clicar no input primeiro
+                        input_radio = span.find_element(By.XPATH, ".//input[@type='radio']")
+                        print(
+                            f"[DEBUG] Clicando no input para: '{texto_label}' (ID: {input_radio.get_attribute('id')})")
+
+                        # Scroll para visibilidade
+                        self.driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center', behavior:'smooth'});",
+                            input_radio
+                        )
+                        time.sleep(0.1)
+
+                        # Tenta múltiplas estratégias de clique
+                        if self._clicar_radio_com_estrategias(input_radio, label):
+                            # Verifica se foi marcado corretamente
+                            time.sleep(0.1)
+                            if input_radio.is_selected():
+                                print(f"[OK] Resposta '{texto_label}' marcada com sucesso")
+                                return True
+                            else:
+                                print(f"[WARN] Input não foi selecionado após clique")
+                        else:
+                            print(f"[WARN] Falha nas estratégias de clique para '{texto_label}'")
+
+                    except Exception as e:
+                        print(f"[ERROR] Erro ao marcar opção '{texto_label}': {e}")
+
+            except Exception as e:
+                print(f"[DEBUG] Erro ao processar span: {e}")
+                continue
+
+        print(f"[ERROR] Não foi possível encontrar/marcar a opção '{alvo}'")
+        return False
+
+    def _texto_label_corresponde(self, texto_label: str, alvo: str) -> bool:
+        """Verifica se o texto do label corresponde ao alvo desejado."""
+        texto_label_norm = normalizar_string(texto_label)
+        alvo_norm = normalizar_string(alvo)
+
+        # Para "NA", aceita apenas variações de "não se aplica", sem confundir com "NÃO"
+        if alvo_norm in ("NA", "N/A"):
+            # Normalizações possíveis para rótulos de NA
+            possiveis_na = (
+                "NA",
+                "N/A",
+                "NAO APLICAVEL",
+                "NAO SE APLICA",
+                "NAO SE APLICAR",
+                "NAO APLICAVEL AO TRABALHO",
+                "NAO SE APLICA AO TRABALHO",
+            )
+            if texto_label_norm in possiveis_na:
+                return True
+
+            # Aceita textos maiores contendo claramente "NAO SE APLICA" ou "NAO APLICAVEL"
+            if "NAO SE APLICA" in texto_label_norm or "NAO APLICAVEL" in texto_label_norm:
+                return True
+
+            # Importante: NÃO considerar "NAO" ou "NAO." isolado como NA
+            return False
+
+        # Para "Sim" e "Não", comparações diretas
+        elif alvo_norm == "SIM":
+            return texto_label_norm == "SIM"
+        elif alvo_norm in ["NAO", "NÃO"]:
+            return texto_label_norm in ["NAO", "NÃO"]
+
+        # Fallback: comparação exata normalizada
+        return texto_label_norm == alvo_norm
+
+    def _clicar_radio_com_estrategias(self, input_radio, label) -> bool:
+        """Tenta múltiplas estratégias para clicar em um radio button."""
+        estrategias = [
+            # Estratégia 1: JavaScript no input
+            lambda: self.driver.execute_script("arguments[0].click();", input_radio),
+
+            # Estratégia 2: JavaScript no label
+            lambda: self.driver.execute_script("arguments[0].click();", label),
+
+            # Estratégia 3: Clique direto no input
+            lambda: input_radio.click(),
+
+            # Estratégia 4: Clique direto no label
+            lambda: label.click(),
+
+            # Estratégia 5: Actions API (simulada via JS)
+            lambda: self.driver.execute_script("""
+                var evt = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                });
+                arguments[0].dispatchEvent(evt);
+            """, input_radio),
+        ]
+
+        for idx, estrategia in enumerate(estrategias, 1):
+            try:
+                estrategia()
+                time.sleep(0.05)
+
+                # Verifica se funcionou
+                if input_radio.is_selected():
+                    print(f"[DEBUG] Estratégia {idx} funcionou")
+                    return True
+
+            except Exception as e:
+                print(f"[DEBUG] Estratégia {idx} falhou: {e}")
+                continue
+
+        return False
+
+    def _mapear_opcoes_resposta(self, container) -> Dict[str, Tuple[Any, Any]]:
+        """Mapeia opções de resposta disponíveis."""
+        opcoes = {}
+        spans = container.find_elements(By.XPATH, ".//span[.//input[@type='radio']]")
+
+        for span in spans:
+            try:
+                input_el = span.find_element(By.XPATH, ".//input[@type='radio']")
+                label_el = span.find_element(By.TAG_NAME, "label")
+                texto_label = label_el.text or ""
+                texto_norm = normalizar_string(texto_label)
+
+                # Simplifica para categorias principais
+                if "SIM" in texto_norm:
+                    chave = "SIM"
+                elif "NAO" in texto_norm or "NÃO" in texto_norm:
+                    chave = "NAO"
+                elif texto_norm in ("NA", "N/A"):
+                    chave = "NA"
+                else:
+                    chave = texto_norm
+
+                opcoes[chave] = (input_el, label_el)
+            except NoSuchElementException:
+                continue
+
+        return opcoes
+
+    def _determinar_alvo_resposta(self, resposta_norm: str, opcoes: Dict[str, Tuple]) -> Optional[Tuple]:
+        """Determina qual opção selecionar baseado na resposta normalizada."""
+        if resposta_norm in ("SIM", "NAO", "NA"):
+            return opcoes.get(resposta_norm)
+
+        # Fallback: busca direta
+        return opcoes.get(resposta_norm)
+
+    def _clicar_radio_com_retry(self, input_el, label_el, max_tentativas: int = 3) -> bool:
+        """Clica em rádio com múltiplas tentativas e validação."""
+        radio_id = input_el.get_attribute("id")
+
+        for tentativa in range(max_tentativas):
+            try:
+                # Scroll e clique
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center', inline:'nearest'});",
+                    label_el or input_el
+                )
+
+                # Tenta múltiplas estratégias
+                if not self._tentar_cliques_radio(input_el, label_el):
+                    continue
+
+                # Valida seleção
+                if self._validar_selecao_radio(input_el, radio_id):
+                    return True
+
+            except StaleElementReferenceException:
+                if tentativa == max_tentativas - 1:
+                    break
+                time.sleep(0.1 * (tentativa + 1))
+
+        print(f"[WARN] Falha ao marcar rádio id={radio_id}")
+        return False
+
+    def _tentar_cliques_radio(self, input_el, label_el) -> bool:
+        """Tenta múltiplas estratégias de clique no rádio."""
+        estrategias = [
+            lambda: label_el.click() if label_el else False,
+            lambda: self.driver.execute_script("arguments[0].click();", label_el) if label_el else False,
+            lambda: input_el.click(),
+            lambda: self.driver.execute_script("arguments[0].click();", input_el),
+        ]
+
+        for estrategia in estrategias:
+            try:
+                estrategia()
+                time.sleep(0.05)
+                if input_el.is_selected():
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    def _validar_selecao_radio(self, input_el, radio_id: str) -> bool:
+        """Valida se o rádio está realmente selecionado."""
+        try:
+            if radio_id:
+                # Re-localiza por ID para garantir
+                elemento = self.driver.find_element(By.ID, radio_id)
+                return elemento.is_selected()
+            return input_el.is_selected()
+        except Exception:
+            return False
+
+    def _log_resultado(self, total: int, sucessos: int):
+        """Log do resultado do processamento."""
+        falhas = total - sucessos
+        print(f"\n[RESUMO] Questionário PT:")
+        print(f"  • Total de questões: {total}")
+        print(f"  • Marcadas com sucesso: {sucessos}")
+        print(f"  • Falhas: {falhas}")
+        print(f"  • Taxa de sucesso: {(sucessos / total * 100):.1f}%" if total > 0 else "0%")
+
+
+# -------------------------------------------------------------------
+# EPI adicional - Módulo otimizado
+# -------------------------------------------------------------------
+class EPIAdicionalProcessor:
+    """Processador otimizado para EPI adicional."""
+
+    def __init__(self, driver, timeout: float):
+        self.driver = driver
+        self.timeout = timeout
+        self.debug = False
+
+    @timeit_decorator()
+    def preencher(self, epi_radios_plano, debug: bool = False):
+        """Preenche bloco 'EPI adicional necessário e proteções'."""
+        self.debug = debug
+
+        print("[STEP] Preenchendo EPI adicional...")
+        goto_tab(self.driver, "EPI", self.timeout)
+
+        # LOG de quantos containers existem p/ esse XPATH
+        containers = self.driver.find_elements(By.XPATH, XPATH_CONTAINER_EPI)
+        print(f"[DEBUG][EPI] Containers EPI encontrados (raw XPATH): {len(containers)}")
+
+        container = self._obter_container_epi()
+        if not container:
+            print("[DEBUG][EPI] Container EPI não encontrado – abortando EPI adicional.")
+            return
+
+        # Mostra um pedaço do HTML do container para garantir que é o lugar certo
+        try:
+            html_preview = container.get_attribute("outerHTML")[:500]
+            html_preview = html_preview.replace("\n", " ").replace("\r", " ")
+            print(f"[DEBUG][EPI] Container EPI (preview HTML): {html_preview}")
+        except Exception:
+            pass
+
+        mapa_respostas = self._extrair_mapa_respostas(epi_radios_plano)
+        print(f"[DEBUG][EPI] mapa_respostas extraído: {mapa_respostas}")
+
+        self._processar_questoes_epi(container, mapa_respostas)
+
+    def _obter_container_epi(self):
+        """Obtém container do EPI adicional."""
+        try:
+            return WebDriverWait(self.driver, self.timeout).until(
+                EC.presence_of_element_located((By.XPATH, XPATH_CONTAINER_EPI))
+            )
+        except TimeoutException:
+            print("[ERROR] Container EPI adicional não encontrado")
+            return None
+
+    def _extrair_mapa_respostas(self, epi_radios_plano) -> Dict[str, str]:
+        """Extrai mapa de códigos para respostas."""
+        mapa = {}
+
+        def processar_item(chave, valor):
+            if isinstance(chave, str) and chave.upper().startswith("Q"):
+                resposta = self._extrair_resposta_valor(valor)
+                if resposta:
+                    mapa[chave.upper()] = resposta
+
+        if isinstance(epi_radios_plano, dict):
+            for chave, valor in epi_radios_plano.items():
+                if isinstance(chave, (tuple, list)) and len(chave) > 0:
+                    processar_item(chave[0], valor)
+                else:
+                    processar_item(chave, valor)
+
+        return mapa
+
+    def _extrair_resposta_valor(self, valor) -> Optional[str]:
+        """Extrai resposta de um valor complexo."""
+        if isinstance(valor, (str, int, float)):
+            resposta = str(valor).strip().upper()
+            return resposta if resposta in ("SIM", "NÃO", "NAO") else None
+
+        if isinstance(valor, dict):
+            for campo in ("resp", "resposta", "valor", "value"):
+                if campo in valor and valor[campo]:
+                    resposta = str(valor[campo]).strip().upper()
+                    if resposta in ("SIM", "NÃO", "NAO"):
+                        return resposta
+
+        if isinstance(valor, (list, tuple)) and valor:
+            return self._extrair_resposta_valor(valor[0])
+
+        return None
+
+    def _processar_questoes_epi(self, container, mapa_respostas: Dict[str, str]):
+        """Processa todas as questões de EPI adicional."""
+        rows = container.find_elements(By.XPATH, ".//div[starts-with(@id,'questao_')]")
+        print(f"[INFO][EPI] EPI adicional: {len(rows)} questões encontradas dentro do container EPI")
+
+        for row in rows:
+            self._processar_questao_epi(row, mapa_respostas)
+
+        print("[INFO][EPI] EPI adicional concluído")
+
+    def _processar_questao_epi(self, row, mapa_respostas: Dict[str, str]):
+        """Processa uma questão individual de EPI."""
+        info = self._extrair_info_questao(row)
+        if not info:
+            print("[DEBUG][EPI] Questão sem info – ignorando.")
+            return
+
+        resposta = self._obter_resposta_esperada(info, mapa_respostas)
+        print(f"[DEBUG][EPI] Questão {info['codigo']}: '{info['pergunta'][:60]}...' "
+              f"→ resposta esperada: {resposta}")
+
+        if not resposta:
+            return
+
+        self._marcar_resposta_epi(row, info['codigo'], info['pergunta'], resposta)
+
+    def _extrair_info_questao(self, row) -> Optional[Dict]:
+        """Extrai informações da questão."""
+        try:
+            # Ordem
+            ordem_elem = row.find_element(By.CSS_SELECTOR, ".ordem")
+            ordem_raw = ordem_elem.text.strip() if ordem_elem.text else ""
+            ordem = ordem_raw.lstrip("0") or ordem_raw
+
+            # Pergunta
+            pergunta_elem = row.find_element(By.XPATH, ".//div[contains(@class,'pergunta')]")
+            pergunta = pergunta_elem.text.strip() if pergunta_elem.text else ""
+
+            return {
+                'codigo': f"Q{ordem.zfill(3)}" if ordem else None,
+                'pergunta': pergunta,
+            }
+        except NoSuchElementException:
+            return None
+
+    def _obter_resposta_esperada(self, info: Dict, mapa_respostas: Dict[str, str]) -> Optional[str]:
+        """Obtém resposta esperada para a questão."""
+        # Tenta por código
+        if info['codigo'] and info['codigo'] in mapa_respostas:
+            return mapa_respostas[info['codigo']]
+
+        # Tenta por texto da pergunta
+        if info['pergunta']:
+            pergunta_norm = normalizar_string(info['pergunta'])
+            for chave, valor in mapa_respostas.items():
+                if isinstance(chave, str) and normalizar_string(chave) == pergunta_norm:
+                    return valor
+
+        return None
+
+    def _marcar_resposta_epi(self, row, codigo: str, pergunta: str, resposta: str):
+        """Marca resposta na questão de EPI."""
+        alvo_label = "Sim" if normalizar_string(resposta) == "SIM" else "Não"
+
+        print(f"[DEBUG][EPI] MARCAR {codigo or '?'} → '{alvo_label}' | {pergunta[:80]}...")
+
+        # Se estiver em modo dry-run, NÃO clicar, apenas logar
+        if self.debug:
+            print("[DEBUG][EPI] DRY-RUN ATIVO – nenhum clique será efetuado.")
+            return
+
+        try:
+            resposta_div = row.find_element(By.CSS_SELECTOR, ".resposta.simnao")
+            spans = resposta_div.find_elements(By.TAG_NAME, "span")
+
+            for span in spans:
+                try:
+                    label = span.find_element(By.TAG_NAME, "label")
+                    if normalizar_string(label.text) == normalizar_string(alvo_label):
+                        self.driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", label
+                        )
+                        label.click()
+                        print(f"[INFO][EPI] EPI adicional {codigo or '?'}: '{alvo_label}' | {pergunta[:50]}...")
+                        return
+                except NoSuchElementException:
+                    continue
+        except NoSuchElementException:
+            print(f"[WARN][EPI] Container de resposta não encontrado para {codigo or '?'}")
+
+
+# -------------------------------------------------------------------
+# Análise Ambiental - Módulo otimizado
+# -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Análise Ambiental - Módulo otimizado (somente 5 perguntas AMB)
+# -------------------------------------------------------------------
+class AnaliseAmbientalProcessor:
+    """Processador otimizado da Análise Ambiental."""
+
+    def __init__(self, driver, timeout: float):
+        self.driver = driver
+        self.timeout = timeout
+
+    @timeit_decorator()
+    def preencher(self):
+        """Preenche todas as questões da Análise Ambiental como 'Não'."""
+        print("[STEP] Preenchendo Análise Ambiental...")
+        goto_tab(self.driver, "Análise Ambiental", self.timeout)
+        time.sleep(0.3)
+
+        # Localizar o container principal
+        container = self._localizar_container_amb()
+        if not container:
+            print("[WARN] Container AMB não encontrado")
+            return
+
+        # Processar questões
+        total, sucessos = self._processar_questoes_amb(container)
+        print(f"[INFO] Análise Ambiental: {sucessos}/{total} questões marcadas como 'Não'")
+
+    def _localizar_container_amb(self):
+        """Localiza o container principal da Análise Ambiental."""
+        try:
+            # Tentar diferentes localizadores
+            localizadores = [
+                "//div[@id='AMB']",
+                "//div[contains(@class,'ambiental')]",
+                "//div[h4[contains(.,'O local de trabalho tem:')]]",
+                "//div[h4[contains(.,'Análise Ambiental')]]",
+            ]
+
+            for loc in localizadores:
+                try:
+                    container = WebDriverWait(self.driver, 2).until(
+                        EC.presence_of_element_located((By.XPATH, loc))
+                    )
+                    print(f"[DEBUG][AMB] Container encontrado com: {loc}")
+                    return container
+                except TimeoutException:
+                    continue
+
+        except Exception as e:
+            print(f"[ERROR][AMB] Falha ao localizar container: {e}")
+
+        return None
+
+    def _processar_questoes_amb(self, container):
+        """Processa todas as questões dentro do container."""
+        # Encontrar linhas de questões
+        rows = container.find_elements(
+            By.XPATH, ".//div[starts-with(@id,'questao_') or contains(@class,'row question-row')]"
+        )
+
+        if not rows:
+            # Tentar método alternativo
+            rows = container.find_elements(
+                By.XPATH, ".//div[contains(@class,'row') and .//div[contains(@class,'pergunta')]]"
+            )
+
+        print(f"[DEBUG][AMB] Encontradas {len(rows)} linhas de questões")
+
+        total = len(rows)
+        sucessos = 0
+
+        for idx, row in enumerate(rows, 1):
+            try:
+                if self._marcar_nao_questao(row, idx):
+                    sucessos += 1
+            except Exception as e:
+                print(f"[WARN][AMB] Erro na questão {idx}: {e}")
+
+        return total, sucessos
+
+    def _marcar_nao_questao(self, row, idx: int) -> bool:
+        """Marca uma questão específica como 'Não'."""
+        try:
+            # Obter texto da pergunta para logging
+            pergunta = "?"
+            try:
+                pergunta_elem = row.find_element(By.XPATH, ".//div[contains(@class,'pergunta')]")
+                pergunta = pergunta_elem.text[:50] + "..." if len(pergunta_elem.text) > 50 else pergunta_elem.text
+            except:
+                pass
+
+            # Encontrar container de resposta
+            resposta_container = row.find_element(
+                By.XPATH, ".//div[contains(@class,'resposta')]"
+            )
+
+            # Encontrar opção "Não"
+            # Método 1: Procurar por label
+            labels = resposta_container.find_elements(By.TAG_NAME, "label")
+            label_nao = None
+
+            for label in labels:
+                texto = normalizar_string(label.text or "")
+                if texto in ["NAO", "NÃO", "N"]:
+                    label_nao = label
+                    break
+
+            if label_nao:
+                # Clique no label
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", label_nao)
+                time.sleep(0.05)
+
+                # Tenta múltiplas estratégias de clique
+                estrategias = [
+                    lambda: self.driver.execute_script("arguments[0].click();", label_nao),
+                    lambda: label_nao.click(),
+                ]
+
+                for estrategia in estrategias:
+                    try:
+                        estrategia()
+                        time.sleep(0.1)
+
+                        # Verificar se foi marcado
+                        # Encontrar input associado
+                        input_id = label_nao.get_attribute("for")
+                        if input_id:
+                            input_elem = row.find_element(By.ID, input_id)
+                            if input_elem.is_selected():
+                                print(f"[INFO][AMB] Questão {idx}: '{pergunta}' → Não [OK]")
+                                return True
+                    except:
+                        continue
+
+            # Método 2: Procurar input diretamente pelo value
+            inputs = resposta_container.find_elements(By.TAG_NAME, "input")
+            for input_elem in inputs:
+                input_type = input_elem.get_attribute("type")
+                if input_type == "radio":
+                    value = input_elem.get_attribute("value") or ""
+                    # Normalmente 1=Não, 0=Sim
+                    if value == "1":
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", input_elem)
+                        self.driver.execute_script("arguments[0].click();", input_elem)
+                        time.sleep(0.1)
+
+                        if input_elem.is_selected():
+                            print(f"[INFO][AMB] Questão {idx}: '{pergunta}' → Não [OK]")
+                            return True
+
+            print(f"[WARN][AMB] Questão {idx}: Não conseguiu marcar 'Não'")
+            return False
+
+        except Exception as e:
+            print(f"[ERROR][AMB] Falha na questão {idx}: {e}")
+            return False
+
+
+
+# -------------------------------------------------------------------
+# APN-1 - Módulo otimizado
+# -------------------------------------------------------------------
+class APN1Processor:
+    """Processador otimizado para APN-1."""
+
+    def __init__(self, driver, timeout: float):
+        self.driver = driver
+        self.timeout = timeout
+
+    @timeit_decorator()
+    def preencher(self, descricao: str, caracteristicas: str):
+        """Preenche APN-1 baseado no contexto da etapa."""
+        print("[STEP] Preenchendo APN-1 (análise dinâmica por texto)...")
+        goto_tab(self.driver, "APN-1", self.timeout)
+        time.sleep(0.5)
+
+        # Normalizar contexto
+        contexto = normalizar_string(f"{descricao} {caracteristicas}")
+        print(f"[DEBUG][APN1] Contexto normalizado: {contexto[:200]}...")
+
+        # Coletar perguntas
+        perguntas = self._coletar_perguntas()
+
+        if not perguntas:
+            print("[WARN] Nenhuma pergunta APN-1 encontrada")
+            return
+
+        # Processar cada pergunta
+        self._processar_perguntas(perguntas, contexto)
+
+    def _coletar_perguntas(self) -> List[Dict]:
+        """Coleta todas as perguntas APN-1 da tela de forma otimizada."""
+        rows = []
+
+        # Tentar diferentes XPaths
+        xpaths_tentativas = [
+            "//div[starts-with(@id,'questao_')]",
+            "//div[contains(@class,'row') and starts-with(@id,'questao_')]",
+            "//div[@id='APN1']//div[starts-with(@id,'questao_')]",
+        ]
+
+        for xpath in xpaths_tentativas:
+            try:
+                rows = self.driver.find_elements(By.XPATH, xpath)
+                if rows:
+                    print(f"[DEBUG][APN1] Encontradas {len(rows)} perguntas com XPath: {xpath}")
+                    break
+            except Exception:
+                continue
+
+        if not rows:
+            print("[DEBUG][APN1] Nenhuma pergunta APN-1 encontrada")
+            return []
+
+        perguntas = []
+        for idx, row in enumerate(rows, 1):
+            pergunta_info = self._extrair_info_pergunta(row, idx)
+            if pergunta_info:
+                perguntas.append(pergunta_info)
+
+        print(f"[INFO] APN-1: {len(perguntas)} perguntas coletadas")
+        return perguntas
+
+    def _extrair_info_pergunta(self, row, indice: int) -> Optional[Dict]:
+        """Extrai informações de uma pergunta individual."""
+        try:
+            # Texto da pergunta
+            pergunta_elem = row.find_element(By.XPATH, ".//div[contains(@class,'pergunta')]")
+            texto = pergunta_elem.text.strip() if pergunta_elem.text else ""
+
+            if not texto:
+                return None
+
+            texto_norm = normalizar_string(texto)
+
+            # IDs dos radio buttons (SIM/NÃO)
+            id_sim, id_nao = self._extrair_ids_radios(row)
+
+            # Ordem/número da questão
+            ordem_elem = row.find_element(By.XPATH, ".//div[contains(@class,'ordem')]")
+            ordem = ordem_elem.text.strip() if ordem_elem.text else str(indice)
+
+            return {
+                'indice': indice,
+                'ordem': ordem,
+                'texto': texto,
+                'texto_norm': texto_norm,
+                'id_sim': id_sim,
+                'id_nao': id_nao,
+                'row': row,
+            }
+        except Exception as e:
+            print(f"[DEBUG][APN1] Erro ao extrair pergunta {indice}: {e}")
+            return None
+
+    def _extrair_ids_radios(self, row) -> Tuple[Optional[str], Optional[str]]:
+        """Extrai IDs dos radio buttons SIM/NÃO."""
+        id_sim, id_nao = None, None
+
+        try:
+            # Procura por inputs radio
+            radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
+
+            for radio in radios:
+                radio_id = radio.get_attribute("id") or ""
+                value = radio.get_attribute("value") or ""
+
+                # Verifica pelo value (0=Sim, 1=Não)
+                if value == "0" or "sim" in radio_id.lower():
+                    id_sim = radio_id
+                elif value == "1" or "nao" in radio_id.lower() or "não" in radio_id.lower():
+                    id_nao = radio_id
+
+            # Fallback: procura por labels
+            if not id_sim or not id_nao:
+                labels = row.find_elements(By.XPATH, ".//label")
+                for label in labels:
+                    texto = normalizar_string(label.text or "")
+                    if texto in ["SIM", "S"]:
+                        id_sim = label.get_attribute("for")
+                    elif texto in ["NAO", "NÃO", "N"]:
+                        id_nao = label.get_attribute("for")
+
+        except Exception as e:
+            print(f"[DEBUG][APN1] Erro ao extrair IDs de rádio: {e}")
+
+        return id_sim, id_nao
+
+    def _processar_perguntas(self, perguntas: List[Dict], contexto: str):
+        """Processa todas as perguntas coletadas."""
+        sucessos = 0
+        falhas = 0
+
+        for pergunta in perguntas:
+            if self._processar_pergunta_individual(pergunta, contexto):
+                sucessos += 1
+            else:
+                falhas += 1
+
+        print(f"[DONE] APN-1 finalizado: {sucessos} sucessos, {falhas} falhas")
+
+    def _processar_pergunta_individual(self, pergunta: Dict, contexto: str) -> bool:
+        """Processa uma pergunta individual."""
+        # Determinar resposta baseada no contexto
+        resposta = self._determinar_resposta(pergunta['texto_norm'], contexto)
+
+        # Selecionar ID correto
+        id_alvo = None
+        if resposta == "Sim" and pergunta['id_sim']:
+            id_alvo = pergunta['id_sim']
+        elif resposta == "Não" and pergunta['id_nao']:
+            id_alvo = pergunta['id_nao']
+
+        if not id_alvo:
+            print(f"[WARN] P{pergunta['ordem']}: ID não encontrado para '{resposta}'")
+            return False
+
+        print(f"[INFO] P{pergunta['ordem']} → {resposta} | '{pergunta['texto'][:50]}...'")
+
+        return self._marcar_resposta(pergunta['row'], id_alvo, resposta)
+
+    def _determinar_resposta(self, texto_pergunta: str, contexto: str) -> str:
+        """Determina resposta baseada no texto da pergunta e contexto."""
+        # Por padrão, todas são "Não"
+        resposta = "Não"
+
+        # Mapeamento de padrões de pergunta para palavras-chave no contexto
+        mapeamento = [
+            # Espaço confinado
+            (["espaco confinado", "interior de espaco"], ["ESPACO CONFINADO"]),
+
+            # Altura
+            (["altura acima de 2m", "trabalho em altura", "acesso por cordas"],
+             ["ALTURA", "ACESSO POR CORDAS"]),
+
+            # Sobre o mar
+            (["sobre o mar"], ["SOBRE O MAR"]),
+
+            # Chama aberta
+            (["chama aberta", "solda", "oxicorte", "esmerilhadeira"],
+             ["CHAMA ABERTA", "SOLDA", "OXICORTE", "ESMERILHADEIRA"]),
+
+            # CO2
+            (["protegido por co2", "ambientes protegidos por co2", "sistema de co2"],
+             ["PROTEGIDO POR CO2", "AMBIENTES PROTEGIDOS POR CO2"]),
+
+            # Pressurizado
+            (["pressurizado", "sistema pressurizado"], ["PRESSURIZADO"]),
+
+            # Hidrojato
+            (["hidrojateamento", "hidrojato"], ["HIDROJATO", "HIDROJATEAMENTO"]),
+
+            # Partes móveis
+            (["partes moveis", "partes moveis expostas"], ["PARTES MOVEIS"]),
+        ]
+
+        # Verificar cada padrão
+        for padroes_pergunta, palavras_chave in mapeamento:
+            for padrao in padroes_pergunta:
+                if padrao in texto_pergunta:
+                    # Verificar se alguma palavra-chave está no contexto
+                    for palavra in palavras_chave:
+                        if palavra in contexto:
+                            return "Sim"
+
+        return resposta
+
+    def _marcar_resposta(self, row, element_id: str, resposta: str) -> bool:
+        """Marca resposta via JavaScript ou clique direto."""
+        try:
+            # Primeiro tentar via JavaScript (mais robusto)
+            script = f"""
+            var element = document.getElementById("{element_id}");
+            if (!element) return false;
+
+            // Scroll para visibilidade
+            element.scrollIntoView({{block: 'center', behavior: 'smooth'}});
+
+            // Marcar elemento
+            element.checked = true;
+
+            // Disparar eventos para Angular
+            element.dispatchEvent(new Event('change', {{bubbles: true}}));
+            element.dispatchEvent(new Event('input', {{bubbles: true}}));
+
+            return element.checked === true;
+            """
+
+            resultado = self.driver.execute_script(script)
+
+            if resultado:
+                print(f"[DEBUG][APN1] Resposta '{resposta}' marcada via JavaScript")
+                return True
+
+            # Fallback: clique direto
+            time.sleep(0.1)
+            element = row.find_element(By.ID, element_id)
+            element.click()
+
+            # Verificar se foi marcado
+            time.sleep(0.1)
+            if element.is_selected():
+                print(f"[DEBUG][APN1] Resposta '{resposta}' marcada via clique")
+                return True
+
+        except Exception as e:
+            print(f"[DEBUG][APN1] Erro ao marcar resposta: {e}")
+
+            # Último recurso: clique via ActionChains
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                element = row.find_element(By.ID, element_id)
+                ActionChains(self.driver).move_to_element(element).click().perform()
+                time.sleep(0.1)
+                return element.is_selected()
+            except Exception as e2:
+                print(f"[ERROR][APN1] Falha completa ao marcar resposta: {e2}")
+
+        return False
+
+
+# -------------------------------------------------------------------
+# Funções de interface pública (mantidas para compatibilidade)
+# -------------------------------------------------------------------
+@timeit_decorator()
+def preencher_questionario_pt(driver, timeout: float, qpt_plano: Dict[Tuple[str, str], str]):
+    """Interface pública para preenchimento do Questionário PT."""
+    processor = QuestionarioPTProcessor(driver, timeout)
+    resultado = processor.preencher(qpt_plano)
+
+    # Apenas confirmação normal, sem fluxo adicional
+    print("[INFO] Questionário PT concluído")
+    return resultado
+
+
+@timeit_decorator()
+def preencher_epi_adicional(driver, timeout: float, epi_radios_plano):
+    """Interface pública para preenchimento de EPI adicional."""
+    print("\n[DEBUG][EPI] ===== INÍCIO preencher_epi_adicional =====")
+
+    # **ADICIONAR: Fechar qualquer modal aberto antes de navegar**
+    from quent1_infra import ensure_no_messagebox, click_messagebox_ok
+    ensure_no_messagebox(driver, timeout)
+
+    print(f"[DEBUG][EPI] epi_radios_plano (raw): {repr(epi_radios_plano)}")
+
+    processor = EPIAdicionalProcessor(driver, timeout)
+    processor.preencher(epi_radios_plano, debug=DEBUG_EPI_DRY_RUN)
+
+    print("[DEBUG][EPI] ===== FIM preencher_epi_adicional =====\n")
+
+
+@timeit_decorator()
+def preencher_analise_ambiental(driver, timeout: float):
+    """Interface pública para preenchimento da Análise Ambiental."""
+    processor = AnaliseAmbientalProcessor(driver, timeout)
+    processor.preencher()
+
+
+
+
+@timeit_decorator()
+def preencher_apn1(driver, timeout: float, descricao: str, caracteristicas: str):
+    """Interface pública para preenchimento do APN-1."""
+    processor = APN1Processor(driver, timeout)
+    processor.preencher(descricao, caracteristicas)
+
+
+
+
+
+
+
+
+
+
+
+**************************************************************************************
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+
+
+
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+quent4_epi.py
+Processamento da aba EPI:
+- Leitura dos EPIs atuais por categoria
+- Inclusão de itens faltantes conforme plano
+- (Remoção de excedentes opcional)
+"""
+
+import time
+from typing import Dict, List, Tuple, Set, Optional, NamedTuple, Any
+from functools import wraps, lru_cache
+from collections import defaultdict
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
+
+from quent1_infra import goto_tab
+
+# -------------------------------------------------------------------
+# Constantes e configurações
+# -------------------------------------------------------------------
+CATEGORIAS_EPI = ["Vestimentas", "Óculos", "Luvas", "Proteção Respiratória"]
+
+# XPATHS comuns
+XPATH_LABEL_CATEGORIA = "//app-epi-da-etapa//label[normalize-space()='{}']"
+XPATH_MODAL_CONTENT = "//app-epi-da-etapa//app-associar-epi//app-modal//div[contains(@class,'modal-content')]"
+XPATH_MODAL_TABLE = "//app-epi-da-etapa//app-associar-epi//table//tr[.//td]"
+XPATH_BTN_CONFIRMAR = "//app-epi-da-etapa//app-associar-epi//button[normalize-space()='Confirmar']"
+XPATH_BTN_CANCELAR = "//app-epi-da-etapa//app-associar-epi//button[normalize-space()='Cancelar']"
+
+
+# -------------------------------------------------------------------
+# Decorator para medição de tempo otimizado
+# -------------------------------------------------------------------
+def timeit_decorator(func_name: Optional[str] = None):
+    """Decorator para medição de tempo de execução."""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+            result = func(*args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            name = func_name or func.__name__
+            print(f"[TIMER] {name}: {elapsed:.3f}s")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# -------------------------------------------------------------------
+# Classes de dados para melhor organização
+# -------------------------------------------------------------------
+class ResultadoComparacao(NamedTuple):
+    """Resultado da comparação de itens EPI."""
+    faltantes: Set[str]
+    excedentes: Set[str]
+
+
+class CategoriaInfo(NamedTuple):
+    """Informações de uma categoria EPI."""
+    nome: str
+    label_element: Any
+    container: Any
+    itens_atuais: List[str]
+
+
+# -------------------------------------------------------------------
+# Utilitários de manipulação de texto e XPATH
+# -------------------------------------------------------------------
+@lru_cache(maxsize=128)
+def normalizar_texto_epi(texto: str) -> str:
+    """Normaliza texto para comparações de EPI."""
+    if not texto:
+        return ""
+    return ' '.join(texto.split()).upper().strip()
+
+
+def criar_xpath_literal(texto: str) -> str:
+    """
+    Cria literal XPath seguro para strings contendo aspas.
+
+    Exemplo: "O'Connor" -> "concat('O',\"'\",'Connor')"
+    """
+    if "'" not in texto:
+        return f"'{texto}'"
+    if '"' not in texto:
+        return f'"{texto}"'
+
+    partes = texto.split("'")
+    concat_parts = []
+    for i, parte in enumerate(partes):
+        concat_parts.append(f"'{parte}'")
+        if i < len(partes) - 1:
+            concat_parts.append('"\'"')
+
+    return f"concat({', '.join(concat_parts)})"
+
+
+# -------------------------------------------------------------------
+# Classe principal de processamento EPI
+# -------------------------------------------------------------------
+class EPIProcessor:
+    """Processador otimizado para aba EPI."""
+
+    def __init__(self, driver, timeout: float):
+        self.driver = driver
+        self.timeout = timeout
+        self.categorias_info: Dict[str, CategoriaInfo] = {}
+
+    @timeit_decorator()
+    def processar(self, epis_cat_plano: Dict[str, Set[str]]):
+        """Processa a aba EPI completa."""
+        print("[STEP] Processando aba 'EPI'...")
+        goto_tab(self.driver, "EPI", self.timeout)
+
+        # Processa todas as categorias
+        for categoria in CATEGORIAS_EPI:
+            self._processar_categoria(categoria, epis_cat_plano)
+
+        print("[INFO] Aba EPI processada")
+
+    def _processar_categoria(self, categoria: str, plano: Dict[str, Set[str]]):
+        """Processa uma categoria específica."""
+        print(f"\n[EPI] Processando categoria: {categoria}")
+
+        # Coleta informações da categoria
+        info = self._coletar_info_categoria(categoria)
+        if not info:
+            return
+
+        # Compara com plano
+        resultado = self._comparar_com_plano(info, plano)
+
+        # Inclui itens faltantes
+        if resultado.faltantes:
+            self._incluir_itens_faltantes(categoria, resultado.faltantes)
+
+        # Remoção de excedentes (opcional - comentado)
+        # if resultado.excedentes:
+        #     self._remover_itens_excedentes(categoria, resultado.excedentes)
+
+    def _coletar_info_categoria(self, categoria: str) -> Optional[CategoriaInfo]:
+        """Coleta todas as informações de uma categoria."""
+        try:
+            label = WebDriverWait(self.driver, self.timeout).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, XPATH_LABEL_CATEGORIA.format(categoria))
+                )
+            )
+
+            container = self._obter_container_categoria(label)
+            itens = self._extrair_itens_categoria(container)
+
+            info = CategoriaInfo(categoria, label, container, itens)
+            self.categorias_info[categoria] = info
+
+            return info
+
+        except TimeoutException:
+            print(f"[WARN] Categoria '{categoria}' não encontrada")
+            return None
+        except Exception as e:
+            print(f"[ERROR] Erro ao coletar info da categoria '{categoria}': {e}")
+            return None
+
+    def _obter_container_categoria(self, label_element) -> Optional[Any]:
+        """Obtém container da categoria a partir do label."""
+        try:
+            return label_element.find_element(
+                By.XPATH, "./ancestor::div[contains(@class,'row')][1]/.."
+            )
+        except NoSuchElementException:
+            try:
+                return label_element.find_element(By.XPATH, "./ancestor::div[1]")
+            except NoSuchElementException:
+                return None
+
+    def _extrair_itens_categoria(self, container) -> List[str]:
+        """Extrai itens EPI do container da categoria."""
+        if not container:
+            return []
+
+        itens = []
+        try:
+            tbodies = container.find_elements(By.XPATH, ".//table/tbody")
+            for tbody in tbodies:
+                linhas = tbody.find_elements(By.XPATH, ".//tr")
+                for linha in linhas:
+                    item = self._extrair_item_linha(linha)
+                    if item:
+                        itens.append(item)
+        except Exception as e:
+            print(f"[DEBUG] Erro ao extrair itens: {e}")
+
+        print(f"[INFO] Categoria - {len(itens)} item(s) encontrado(s)")
+        return itens
+
+    def _extrair_item_linha(self, linha) -> Optional[str]:
+        """Extrai texto do item de uma linha da tabela."""
+        try:
+            celula = linha.find_element(By.XPATH, "./td[1]")
+            texto = celula.get_attribute("title") or celula.text or ""
+            texto_limpo = texto.strip()
+            return texto_limpo if texto_limpo else None
+        except Exception:
+            return None
+
+    def _comparar_com_plano(self, info: CategoriaInfo, plano: Dict[str, Set[str]]) -> ResultadoComparacao:
+        """Compara itens atuais com o plano esperado."""
+        esperados = plano.get(info.nome, set())
+        atuais_set = set(info.itens_atuais)
+
+        faltantes = esperados - atuais_set
+        excedentes = atuais_set - esperados
+
+        self._log_comparacao(info.nome, esperados, atuais_set, faltantes, excedentes)
+
+        return ResultadoComparacao(faltantes, excedentes)
+
+    def _log_comparacao(self, categoria: str, esperados: Set[str],
+                        atuais: Set[str], faltantes: Set[str], excedentes: Set[str]):
+        """Log detalhado da comparação."""
+        print(f"[EPI] {categoria} - Comparação:")
+        print(f"  Esperados ({len(esperados)}): {sorted(esperados) if esperados else 'nenhum'}")
+        print(f"  Atuais    ({len(atuais)}): {sorted(atuais) if atuais else 'nenhum'}")
+
+        if faltantes:
+            print(f"  Faltantes ({len(faltantes)}):")
+            for item in sorted(faltantes):
+                print(f"    • {item}")
+
+        if excedentes:
+            print(f"  Excedentes ({len(excedentes)}):")
+            for item in sorted(excedentes):
+                print(f"    • {item}")
+
+    def _incluir_itens_faltantes(self, categoria: str, itens_faltantes: Set[str]):
+        """Inclui itens faltantes na categoria."""
+        print(f"[EPI] Incluindo {len(itens_faltantes)} item(s) em '{categoria}'")
+
+        # Verifica se botão '+' está disponível
+        if not self._verificar_botao_adicionar(categoria):
+            return
+
+        # Abre modal de associação
+        if not self._abrir_modal_associacao(categoria):
+            return
+
+        # Seleciona itens no modal
+        self._selecionar_itens_modal(categoria, itens_faltantes)
+
+        # Confirma associação
+        self._confirmar_modal_associacao()
+
+    def _verificar_botao_adicionar(self, categoria: str) -> bool:
+        """Verifica se botão '+' está habilitado."""
+        try:
+            label = self.categorias_info[categoria].label_element
+            linha_cabecalho = label.find_element(
+                By.XPATH, "./ancestor::div[contains(@class,'row')][1]"
+            )
+
+            # Procura botão '+'
+            btn_add = linha_cabecalho.find_element(
+                By.XPATH, ".//button[normalize-space()='+']"
+            )
+
+            if btn_add.is_enabled():
+                return True
+            else:
+                print(f"[WARN] Botão '+' desabilitado para '{categoria}'")
+                return False
+
+        except NoSuchElementException:
+            print(f"[WARN] Botão '+' não encontrado para '{categoria}'")
+            return False
+        except Exception as e:
+            print(f"[ERROR] Erro ao verificar botão '+': {e}")
+            return False
+
+    def _abrir_modal_associacao(self, categoria: str) -> bool:
+        """Abre modal de associação de EPI."""
+        try:
+            label = self.categorias_info[categoria].label_element
+            linha_cabecalho = label.find_element(
+                By.XPATH, "./ancestor::div[contains(@class,'row')][1]"
+            )
+
+            # Clica no botão '+'
+            btn_add = linha_cabecalho.find_element(
+                By.XPATH, ".//button[normalize-space()='+']"
+            )
+            btn_add.click()
+
+            print(f"[CLICK] Modal de associação aberto para '{categoria}'")
+
+            # Aguarda modal abrir
+            WebDriverWait(self.driver, self.timeout).until(
+                EC.visibility_of_element_located((By.XPATH, XPATH_MODAL_CONTENT))
+            )
+
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] Falha ao abrir modal para '{categoria}': {e}")
+            return False
+
+    def _selecionar_itens_modal(self, categoria: str, itens: Set[str]):
+        """Seleciona itens no modal de associação."""
+        if not itens:
+            return
+
+        # Aguarda tabela carregar
+        try:
+            WebDriverWait(self.driver, 2).until(
+                EC.presence_of_element_located((By.XPATH, XPATH_MODAL_TABLE))
+            )
+        except TimeoutException:
+            print(f"[WARN] Modal vazio para '{categoria}'")
+            self._fechar_modal_associacao()
+            return
+
+        # Seleciona cada item
+        for item in sorted(itens):
+            self._selecionar_item_modal(categoria, item)
+
+    def _selecionar_item_modal(self, categoria: str, item: str):
+        """Seleciona um item específico no modal com busca flexível."""
+        # **CORREÇÃO: Buscar por partes do texto para EPI Obrigatório**
+        item_lower = item.lower()
+
+        # Tentar diferentes estratégias de busca
+        estrategias_busca = [
+            # Busca exata
+            lambda: f"//tr[.//td[normalize-space()='{item}']]",
+            # Busca por contém
+            lambda: f"//tr[.//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{item_lower}')]]",
+            # Busca por parte do texto (para EPI Obrigatório)
+            lambda: f"//tr[.//td[contains(., 'EPI') and contains(., 'OBRIGATÓRIOS')]]",
+            lambda: f"//tr[.//td[contains(., 'EPI') and contains(., 'OBRIGATORIOS')]]",
+        ]
+
+        for estrategia in estrategias_busca:
+            try:
+                xpath = estrategia()
+                linha = self.driver.find_element(By.XPATH, xpath)
+                if linha:
+                    # Marca checkbox
+                    checkbox = linha.find_element(By.XPATH, ".//td[1]//input[@type='checkbox']")
+                    if not checkbox.is_selected():
+                        checkbox.click()
+                        print(f"[EPI] Item marcado: '{item}' (encontrado com busca flexível)")
+                        return
+            except NoSuchElementException:
+                continue
+            except StaleElementReferenceException:
+                print(f"[WARN] Elemento STALE ao marcar '{item}'")
+                return
+            except Exception as e:
+                continue
+
+        print(f"[WARN] Item não encontrado no modal (mesmo com busca flexível): '{item}'")
+
+    def _buscar_elemento_com_retry(self, xpath: str, max_tentativas: int = 3) -> Optional[Any]:
+        """Busca elemento com retry em caso de falha."""
+        for tentativa in range(max_tentativas):
+            try:
+                elemento = self.driver.find_element(By.XPATH, xpath)
+                return elemento
+            except NoSuchElementException:
+                if tentativa == max_tentativas - 1:
+                    break
+                time.sleep(0.3)
+
+        return None
+
+    def _confirmar_modal_associacao(self):
+        """Confirma seleção no modal."""
+        try:
+            # Clica em Confirmar
+            btn_confirmar = WebDriverWait(self.driver, self.timeout).until(
+                EC.element_to_be_clickable((By.XPATH, XPATH_BTN_CONFIRMAR))
+            )
+            btn_confirmar.click()
+
+            print("[CLICK] Modal confirmado")
+
+            # Trata popup de código vazio (se aparecer)
+            self._tratar_popup_codigo_vazio()
+
+            # Aguarda modal fechar
+            self._aguardar_modal_fechar()
+
+        except TimeoutException:
+            print("[WARN] Botão Confirmar não encontrado")
+            self._fechar_modal_associacao()
+        except Exception as e:
+            print(f"[ERROR] Erro ao confirmar modal: {e}")
+
+    def _tratar_popup_codigo_vazio(self):
+        """Trata popup de código EPI vazio."""
+        try:
+            WebDriverWait(self.driver, 2).until(
+                EC.visibility_of_element_located((
+                    By.XPATH,
+                    "//div[contains(@class,'modal-content')]"
+                    "//h5[contains(.,'código de EPI não pode ser vazio')]"
+                ))
+            )
+
+            btn_ok = self.driver.find_element(
+                By.XPATH,
+                "//div[contains(@class,'modal-content')]"
+                "//button[normalize-space()='Ok']"
+            )
+            btn_ok.click()
+
+            print("[CLICK] Popup de código vazio tratado")
+
+            WebDriverWait(self.driver, self.timeout).until(
+                EC.invisibility_of_element_located((
+                    By.XPATH,
+                    "//div[contains(@class,'modal-content')]"
+                    "//h5[contains(.,'código de EPI não pode ser vazio')]"
+                ))
+            )
+
+        except TimeoutException:
+            pass  # Popup não apareceu
+
+    def _aguardar_modal_fechar(self):
+        """Aguarda modal fechar."""
+        try:
+            WebDriverWait(self.driver, self.timeout).until(
+                EC.invisibility_of_element_located((By.XPATH, XPATH_MODAL_CONTENT))
+            )
+            print("[INFO] Modal fechado")
+        except TimeoutException:
+            print("[WARN] Modal pode ainda estar visível")
+        finally:
+            time.sleep(0.5)
+
+    def _fechar_modal_associacao(self):
+        """Fecha modal de associação."""
+        try:
+            btn_cancelar = self.driver.find_element(By.XPATH, XPATH_BTN_CANCELAR)
+            btn_cancelar.click()
+            time.sleep(0.1)
+        except Exception:
+            pass
+
+    def _remover_itens_excedentes(self, categoria: str, itens_excedentes: Set[str]):
+        """Remove itens excedentes (opcional - mantido para compatibilidade)."""
+        print(f"[EPI] Removendo {len(itens_excedentes)} item(s) excedentes de '{categoria}'")
+
+        for item in sorted(itens_excedentes):
+            self._remover_item_excedente(categoria, item)
+
+    def _remover_item_excedente(self, categoria: str, item: str):
+        """Remove um item excedente específico."""
+        info = self.categorias_info.get(categoria)
+        if not info:
+            return
+
+        item_norm = normalizar_texto_epi(item)
+        xpath_literal = criar_xpath_literal(item_norm)
+
+        for tentativa in range(2):
+            try:
+                # Reconstrói o XPath para busca
+                xpath_linha = (
+                        ".//table/tbody/tr[.//td[normalize-space()="
+                        + xpath_literal
+                        + " or normalize-space(@title)="
+                        + xpath_literal
+                        + "]]"
+                )
+
+                # Tenta encontrar a linha
+                linha = info.container.find_element(By.XPATH, xpath_linha)
+
+                # Clica na linha para selecionar
+                celula = linha.find_element(By.XPATH, "./td[1]")
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", celula
+                )
+                celula.click()
+                time.sleep(0.1)
+
+                # Encontra botão '-'
+                label = info.label_element
+                linha_cabecalho = label.find_element(
+                    By.XPATH, "./ancestor::div[contains(@class,'row')][1]"
+                )
+
+                btn_remover = linha_cabecalho.find_element(
+                    By.XPATH, ".//button[normalize-space()='-']"
+                )
+                btn_remover.click()
+
+                print(f"[EPI] Item removido: '{item}'")
+
+                # Aguarda remoção
+                try:
+                    WebDriverWait(self.driver, self.timeout).until(EC.staleness_of(linha))
+                except TimeoutException:
+                    time.sleep(0.3)
+
+                time.sleep(0.2)
+                break
+
+            except StaleElementReferenceException:
+                if tentativa == 1:
+                    print(f"[WARN] Falha ao remover '{item}' após STALE")
+                time.sleep(0.3)
+            except NoSuchElementException:
+                print(f"[WARN] Item não encontrado para remoção: '{item}'")
+                break
+            except Exception as e:
+                print(f"[WARN] Erro ao remover '{item}': {e}")
+                break
+
+
+# -------------------------------------------------------------------
+# Função pública de compatibilidade
+# -------------------------------------------------------------------
+@timeit_decorator()
+def processar_aba_epi(driver, timeout: float, epis_cat_plano: Dict[str, Set[str]]):
+    """Processa a aba EPI (interface pública para compatibilidade)."""
+    processor = EPIProcessor(driver, timeout)
+    processor.processar(epis_cat_plano)
+
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+**************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+***************************************************************************************************************************************
+*********************************************************************
+*************************************************************************
+
+
+
+
+
+a lógica que esperada é essa a seguir. Precisamos fazer todos ajustes necessários para garantir que essa lógica seja executada sem erros.
+
+---
+
+## 1. Visão geral do fluxo
+
+**Objetivo:** Automatizar, para etapas de **Trabalho a Quente** na P-18, o preenchimento de:
+
+* Questionário PT
+* EPI adicional necessário e proteções (bloco de rádios na aba EPI)
+* Análise Ambiental
+* APN-1
+* Aba de EPIs vinculados (Vestimentas, Óculos, Luvas, Proteção Respiratória)
+
+**Fluxo alto nível, por etapa (`valor`) e data (`data`):**
+
+1. Login no APLAT (via SSO + keyring, se configurado).
+2. Pesquisa da etapa pela combinação:
+
+   * Data da etapa
+   * Número da etapa (ex.: `18/164/2024`)
+3. Abre o primeiro resultado da lista.
+4. Vai para aba **Dados da Etapa**.
+5. Lê:
+
+   * **Tipo Trabalho** (combo `Trabalho a Quente`, `Trabalho a Frio`, etc.)
+   * **Tipo de Etapa** (PT Diária / PT Extra / etc.)
+   * **Descrição da Etapa**
+   * **Características do trabalho / Observações** (texto maior com palavras-chave).
+6. Se o Tipo Trabalho **não é** “Trabalho a Quente”:
+
+   * Loga que a etapa foi ignorada.
+   * Não preenche nada e segue para próxima etapa.
+7. Se é “Trabalho a Quente”:
+
+   * Normaliza os textos (caixa alta/baixa, acentos, espaços).
+   * Detecta **contextos** (flags booleanas) a partir de palavras-chave.
+   * Com base nesses contextos, gera um **plano de preenchimento**:
+
+     * Questionário PT (mapa pergunta → resposta).
+     * EPI adicional – rádios.
+     * Regras para Análise Ambiental.
+     * APN-1 (quais questões serão “Sim”/“Não”).
+     * EPIs por categoria (Vestimentas, Óculos, Luvas, Proteção Respiratória).
+   * Imprime um relatório de plano (para auditoria).
+8. Aplica o plano na interface:
+
+   * Aba **Questionário PT**
+   * Aba **EPI** (bloco EPI adicional)
+   * Aba **Análise Ambiental**
+   * Aba **APN-1**
+   * Aba **EPI** (grid de EPIs vinculados)
+9. Dá um único **Confirmar** no rodapé da etapa (grava tudo de uma vez).
+10. Passa para a próxima etapa, se existir.
+
+---
+
+## 2. Módulo de coleta de dados da etapa
+
+### 2.1. Leitura de Tipo Trabalho
+
+* Localiza o combo “Tipo Trabalho” na aba Dados da Etapa usando o label.
+* Lê:
+
+  * `value` (código interno, ex.: `"2"`)
+  * texto visível (ex.: `"Trabalho a Quente"`).
+* Loga o valor e o texto selecionados.
+
+**Regra principal:**
+
+* Se o texto não corresponde a “Trabalho a Quente” (após normalização), a etapa é **descartada** pela automação (somente log, sem preenchimentos).
+
+---
+
+### 2.2. Leitura de Tipo de Etapa
+
+* Localiza o fieldset “Tipo de Etapa”.
+* Lê qual radio está marcado e seu texto (PT Diária, PT Extra, etc.).
+* Serve para log / auditoria, mas **não altera** as decisões de preenchimento no momento (a lógica de riscos é guiada por “Trabalho a Quente”, não pelo subtipo de etapa).
+
+---
+
+### 2.3. Descrição da Etapa
+
+* Procura um `textarea` de Descrição dentro de “Dados da Etapa”.
+* Extrai valor/texto, remove espaços em branco excedentes.
+* Se não encontrar, loga aviso e considera descrição vazia.
+
+---
+
+### 2.4. Características do trabalho / Observações
+
+* Tenta localizar um bloco identificado próximo a “Características do trabalho” (label).
+* Se não encontrar esse grupo específico:
+
+  * Usa todo o texto da área “app-dados-da-etapa” como fallback.
+* Isso gera um **texto grande** com:
+
+  * Campos de formulário (rótulos, listas, etc.).
+  * Itens de categoria (ANDAIME, CALDEIRARIA, ESCALADA INDUSTRIAL, etc.).
+  * Observações como “Sobre o Mar”, “Acesso por Cordas”, etc.
+
+Esse texto é a base para as **palavras-chave** de contexto.
+
+---
+
+## 3. Engine de contexto (palavras-chave → flags)
+
+### 3.1. Normalização
+
+Antes de procurar palavras-chave, o sistema aplica normalização:
+
+* Converte para minúsculas.
+* Remove acentos e caracteres especiais básicos.
+* “Compacta” espaços múltiplos em espaço simples.
+* Em algumas partes da lógica (especialmente EPIs) também:
+
+  * Normaliza espaços e quebras de linha em uma única sequência de espaços.
+
+---
+
+### 3.2. Flags de contexto (o que já vemos claramente em log)
+
+Para cada etapa, o plano gera flags booleanas como:
+
+* `tem_acesso_cordas`
+* `tem_agulheiro`
+* `tem_altura`
+* `tem_eletrico`
+* `tem_pneumatico`
+* `tem_sobre_o_mar`
+
+Cada flag é ligada a um ou mais padrões de texto, por exemplo:
+
+| Flag                | Exemplos de palavras/expressões gatilho                              |
+| ------------------- | -------------------------------------------------------------------- |
+| `tem_acesso_cordas` | “acesso por cordas”, “escala industrial”, “escalada industrial”      |
+| `tem_altura`        | “altura”, “acima de 2m”, referência de trabalho em altura / NR-35    |
+| `tem_sobre_o_mar`   | “sobre o mar”, “acima do mar”, “trabalho sobre o mar”                |
+| `tem_agulheiro`     | “agulheiro pneumático”, “agulheiro”, “agulha vibratória”             |
+| `tem_pneumatico`    | “pneumático”, “pneumatica”, uso explícito de ferramentas pneumáticas |
+| `tem_eletrico`      | “painel elétrico”, “equipamento elétrico”, “trabalho elétrico”, etc. |
+
+Na prática, o código varre a **descrição** + **características** e, ao encontrar qualquer gatilho correspondente, marca a flag como `True`.
+
+---
+
+### 3.3. Como as flags são usadas
+
+As flags alimentam a construção de um objeto de **plano de preenchimento**, que tem subestruturas:
+
+* `plano["qpt"]` → Questionário PT (por pergunta)
+* `plano["epi_radios"]` → rádios de EPI adicional
+* `plano["apn1"]` → respostas por questão APN-1
+* `plano["epis_cat"]` → EPIs desejados por categoria (Vestimentas, Óculos, Luvas, Proteção Respiratória)
+* Regras de Análise Ambiental (fixo em Trabalho a Quente)
+
+Exemplo real de flags detectadas na etapa `18/164/2024`:
+
+* tem_acesso_cordas = True
+* tem_agulheiro = True
+* tem_altura = True
+* tem_eletrico = True
+* tem_pneumatico = True
+* tem_sobre_o_mar = True
+
+Isso explica porque o plano fica “pesado” em EPI de altura, salvamento e ruído.
+
+---
+
+## 4. Lógica do plano – Questionário PT
+
+### 4.1. Conceito
+
+* O Questionário PT é representado no plano como um conjunto de **regras por questão**.
+* Cada pergunta na tela tem:
+
+  * Uma **ordem** (001, 002, 003…).
+  * Um texto (“O trabalho a ser realizado é caracterizado como uma mudança?”, etc.).
+* A automação não depende apenas da numeração; ela usa o **texto da pergunta** para mapear a resposta correta, o que torna robusto a reordenações/variações de Q001/Q002.
+
+### 4.2. Padrão base (Trabalho a Quente “normal”)
+
+Para o cenário observado (inspeção com agulheiro, altura, acesso por cordas, sobre o mar), o plano resultou em:
+
+* “Mudança?” → **Não**
+* “Permanência do Operador no Local de Trabalho?” → **Não**
+* “Acompanhamento Periódico?” → **Sim**
+* “As manobras, bloqueios e isolamentos foram executados conforme o plano de isolamento?” → **NA**
+* “O equipamento foi drenado/limpo/ventilado?” → **NA**
+* “Equipamento sinalizado com etiquetas de advertência?” → **NA**
+* “Inspeções prévias em equipamentos elétricos e cabos supensos?” → **Sim**
+* “Sistemas/equipamentos de combate a incêndio não normais – salvaguardas definidas?” → **NA**
+* “Mangueiras de ar comprimido com engates compatíveis e travados?” → **Sim**  (ligado a contexto pneumático)
+* “Local isolado, sinalizado e afastamento do pessoal desnecessário?” → **Sim**
+* “Contenção de fagulhas com mantas adequadas?” → **NA**
+* “Equipamento acoplado a equipamento elétrico – precauções quanto à energização acidental?” → **NA**
+* “Risco de perda de produção?” → **Não**
+* “Sensores de fogo e gás inibidos – salvaguardas definidas?” → **NA**
+* “Observador instruído quanto uso de combate a incêndio?” → **NA** (para este caso)
+
+**Ideia geral da lógica:**
+
+* Há um **perfil padrão de Trabalho a Quente** que parte de:
+
+  * “Mudança?” → Não (não caracteriza alteração de projeto/procedimento).
+  * “Acompanhamento Periódico?” → Sim (trabalho crítico, exige supervisão).
+  * Itens ligados a **procedimentos corporativos** (isolamento, drenagem, etiquetagem, etc.) são NA quando:
+
+    * A etapa descrita não fala em abertura de equipamento, linha, tanque, etc.
+* Itens diretamente relacionados a contexto detectado:
+
+  * Se há ferramentas pneumáticas → “Mangueiras de ar comprimido possuem engates rápidos compatíveis” = Sim.
+  * Se há trabalho em altura/sobre o mar → intensificação de EPI e salvaguardas (refletido mais em APN-1 e EPI do que em QPT, neste cenário).
+
+---
+
+## 5. Lógica do plano – EPI adicional (rádios na aba EPI)
+
+### 5.1. Conceito
+
+Na aba **EPI**, há um bloco “EPI adicional necessário e proteções”, com perguntas do tipo:
+
+* “Cinto de Segurança” → Sim/Não
+* “Ventilação Forçada” → Sim/Não
+* “Colete Salva-vidas” → Sim/Não
+* “Iluminação p/ uso em área classificada (tipo Ex)” → Sim/Não
+* “Dupla Proteção Auricular” → Sim/Não
+* “Protetor Facial” → Sim/Não
+
+O plano `epi_radios` define para cada uma dessas:
+
+* `Sim` / `Não`.
+
+### 5.2. Regras vistas no cenário (cordas + altura + sobre o mar + pneumático)
+
+Resultado do plano:
+
+* Cinto de Segurança → **Sim**
+* Ventilação Forçada → **Não**
+* Colete Salva-vidas → **Sim**
+* Iluminação Ex → **Não**
+* Dupla Proteção Auricular → **Sim**
+* Protetor Facial → **Sim**
+
+Interpretação lógica:
+
+* **Altura/acesso por cordas**:
+
+  * `Cinto de Segurança` = Sim
+    (Trabalho em altura, NR-35 → obrigatório)
+* **Sobre o mar**:
+
+  * `Colete Salva-vidas` = Sim
+    (Trabalho com risco de queda no mar)
+* **Ferramentas pneumáticas / agulheiro**:
+
+  * `Dupla Proteção Auricular` = Sim (nível de ruído elevado)
+  * `Protetor Facial` = Sim (projeção de partículas)
+* **Sem indicação de espaço confinado / ventilação crítica**:
+
+  * `Ventilação Forçada` = Não
+* **Sem menção explícita a área classificada sem EPI Ex específico nessa etapa**:
+
+  * `Iluminação Ex` = Não (não é que não exista área classificada, mas não há indicação de exceção ao padrão)
+
+---
+
+## 6. Lógica do plano – Análise Ambiental
+
+### 6.1. Regra simples de Trabalho a Quente
+
+Para o caso “Trabalho a Quente” no APLATQUENTE, a Análise Ambiental é tratada com uma **regra fixa**:
+
+* Todas as questões (Líquidos inflamáveis, corrosivos, gás tóxico, sólidos combustíveis, etc.) → **“Não”**.
+
+O motivo:
+
+* A etapa que está sendo automatizada não está assumindo a presença, na interface, de um plano de manuseio de produto químico específico – o risco de Trabalho a Quente é tratado em outro lugar (QPT, EPIs, APN-1).
+* O script ainda ignora linhas que não contêm uma pergunta (linhas meramente decorativas/agrupadoras).
+
+---
+
+## 7. Lógica do plano – APN-1
+
+### 7.1. Conceito
+
+APN-1 avalia se, dadas certas condições de risco ampliado, é necessário ou não acionar **APN-2** ou processos adicionais. Cada questão APN-1 é do tipo Sim/Não.
+
+No cenário que analisamos, o plano retorna:
+
+* Sim em:
+
+  * Q007: Trabalho em altura acima de 2 m com risco de queda e não coberto por procedimento rotineiro.
+  * Q008: Trabalho será executado sobre o mar.
+* Não em todas as demais (Q001, Q002, ..., Q006, Q009, ..., Q020).
+
+### 7.2. Regras inferidas por contexto
+
+Base observado:
+
+* `tem_altura` = True → Q007 = **Sim**
+* `tem_sobre_o_mar` = True → Q008 = **Sim**
+* Demais flags (elétrico, pneumático, etc.), no cenário observado, não ativaram outras APNs, possivelmente porque:
+
+  * O trabalho em questão está dentro de uma matriz já tratada por PT/TRBR padrão para esses riscos.
+  * Não há indicação de choque elétrico fora do padrão (não é intervenção em painel crítico, por exemplo).
+
+**Padrão de construção do plano APN-1:**
+
+1. Inicialmente, todas as questões APN-1 são definidas como **“Não”**.
+2. Para cada flag relevante:
+
+   * `tem_altura` → Q007 = Sim.
+   * `tem_sobre_o_mar` → Q008 = Sim.
+   * (Outras flags, em versões futuras, podem ajustar Q009–Q020, mas no cenário observado a lógica ativa apenas estas.)
+
+---
+
+## 8. Lógica do plano – EPIs por categoria (aba EPI, grid de vinculação)
+
+### 8.1. Conceito
+
+Além dos rádios “EPI adicional”, existe a **lista de EPIs vinculados** organizados por categoria:
+
+* Vestimentas
+* Óculos
+* Luvas
+* Proteção Respiratória
+
+O plano define, para cada categoria, o conjunto de EPIs que **deveriam** estar vinculados.
+
+Na execução, a lógica é:
+
+1. Ler itens atuais da categoria (o que já está associado).
+2. Comparar com o conjunto **esperado** do plano.
+3. Calcular:
+
+   * Itens faltantes = esperados – atuais.
+   * Itens excedentes = atuais – esperados.
+4. Incluir faltantes (via modal de associação).
+5. Remover excedentes (clicando linha + botão “-”).
+
+### 8.2. Vestimentas (para o cenário observado)
+
+Plano esperado (Trabalho a Quente, altura, cordas, sobre o mar):
+
+* BOTA CANO ALTO
+* CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y
+* CINTO DE SEG. TP PARA-QUEDISTA
+* CINTO DE SEGURANÇA PARA RESGATE
+* COLETE SALVA VIDAS RF (apenas para trabalhos a quente)
+* COLETE SALVA-VIDAS
+* DUPLA PROTEÇÃO AUDITIVA
+* DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA
+* EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)
+* MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS
+
+Efeito das flags:
+
+* `tem_altura` / `tem_acesso_cordas`:
+
+  * GANHA: cinto para-quedista, cinto de resgate, duplo talabarte, bota cano alto, capacete adequado.
+* `tem_sobre_o_mar`:
+
+  * GANHA: colete salva-vidas + colete salva-vidas RF.
+* `tem_pneumatico` / `tem_agulheiro`:
+
+  * GANHA ou reforça: dupla proteção auditiva.
+* “Trabalho a Quente”:
+
+  * GANHA: EPI´s obrigatórios gerais, macacão adequado.
+
+Na situação que você rodou:
+
+* O sistema:
+
+  * adicionou o “EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)” que faltava.
+  * removeu itens excedentes:
+
+    * VESTIM. RF CLASSE 4
+    * VESTIM. TYVEC
+    * INTERV. REDE ELETRICA (...)
+    * BALACLAVA AE-2
+
+Ou seja, “limpou” tudo que não faz parte do conjunto alvo de Trabalho a Quente com cordas sobre o mar.
+
+---
+
+### 8.3. Óculos
+
+Plano esperado:
+
+* PROTETOR FACIAL
+* ÓCULOS AMPLA VISÃO
+
+No cenário:
+
+* Atuais iniciais:
+
+  * PROTETOR FACIAL
+  * ÓCULOS AMPLA VISÃO
+  * ÓCULOS PROTETOR FACIAL
+  * ÓCULOS SEG. CONTRA POEIRA
+* Itens faltantes: nenhum.
+* Excedentes (para remoção):
+
+  * ÓCULOS PROTETOR FACIAL
+  * ÓCULOS SEG. CONTRA POEIRA
+
+Depois da limpeza ficam apenas:
+
+* PROTETOR FACIAL
+* ÓCULOS AMPLA VISÃO
+
+Ligação com flags:
+
+* `tem_agulheiro` / `tem_pneumatico`:
+
+  * justificam proteção reforçada para olhos/face → protetor facial + óculos de ampla visão.
+
+---
+
+### 8.4. Luvas
+
+Plano esperado:
+
+* LUVA ANTI-VIBRAÇÃO
+* LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')
+
+No cenário:
+
+* Inicialmente, havia uma lista “poluída” com várias luvas (PVC, isolante, rede elétrica, etc.).
+* O plano:
+
+  * Garantiu que as duas luvas de vibração/impacto estivessem presentes.
+  * Removeu tudo que era excedente:
+
+    * luva isolante, luva PVC, luva nitrílica, conjunto de luvas para rede elétrica, “NÃO APLICÁVEL”, etc.
+
+Ligação com flags:
+
+* `tem_agulheiro` / `tem_pneumatico`:
+
+  * Justifica luva anti-vibração e luva de impacto.
+
+---
+
+### 8.5. Proteção Respiratória
+
+Plano esperado:
+
+* PEÇA SEMI-FACIAL FILTRANTE 2
+
+No cenário:
+
+* Inicialmente havia:
+
+  * Máscaras C1 para gases ácidos, metilamina, vapor orgânico.
+  * * peça semi-facial filtrante 2.
+* O plano:
+
+  * Mantém somente o que é aderente ao trabalho de agulheiro/limpeza/inspeção em altura.
+  * Remove as máscaras específicas que não são necessárias naquele contexto.
+
+Ligação com flags:
+
+* Até aqui, o cenário mostra que o plano assume **proteção respiratória básica filtrante** (pó, partículas) como suficiente, sem citar produtos químicos específicos na descrição.
+
+---
+
+## 9. Aplicação do plano na interface (sem código, só comportamento)
+
+### 9.1. Questionário PT
+
+* Navega para aba “Questionário PT”.
+* Lê todas as linhas que contenham um número de ordem e um texto de pergunta.
+* Para cada linha:
+
+  * Identifica a pergunta pelo texto.
+  * Procura no `plano["qpt"]` a resposta correspondente (Sim/Não/NA).
+  * Seleciona o rádio correto na linha (quando a pergunta existe no plano).
+* Ignora:
+
+  * Perguntas não reconhecidas.
+  * Linhas vazias ou decorativas.
+
+---
+
+### 9.2. EPI adicional
+
+* Na aba EPI, dentro de “EPI adicional necessário e proteções”:
+
+  * Lê todas as questões (Q001–Q00X).
+  * Identifica cada uma pelo texto (“Cinto de Segurança”, etc.).
+  * Aplica o `plano["epi_radios"]`, ligando Sim/Não conforme definido.
+
+---
+
+### 9.3. Análise Ambiental
+
+* Vai à aba “Análise Ambiental”.
+* Varre as linhas:
+
+  * Ignora linhas sem pergunta (agrupadores).
+  * Para cada pergunta de fato, marca **“Não”**.
+* É uma aplicação direta da regra fixa.
+
+---
+
+### 9.4. APN-1
+
+* Aba “APN-1”.
+* Mesma estratégia:
+
+  * Ignora linhas de placeholder/vazias.
+  * Para cada pergunta com texto, identifica o código (Q001, Q002, etc.).
+  * Usa o `plano["apn1"]` para marcar cada questão com “Sim” ou “Não”.
+* No exemplo:
+
+  * Q007 e Q008 → Sim.
+  * Todas as demais → Não.
+
+---
+
+### 9.5. Aba EPI – EPIs vinculados por categoria
+
+Para cada categoria em ordem: **Vestimentas**, **Óculos**, **Luvas**, **Proteção Respiratória**:
+
+1. Localiza o bloco da categoria (pelo rótulo).
+2. Lê todos os itens atualmente vinculados.
+3. Calcula faltantes e excedentes versus `plano["epis_cat"][categoria]`.
+
+**Inclusão de faltantes:**
+
+* Se existirem faltantes:
+
+  * Clica no botão “+” da categoria.
+  * Abre modal de associação de EPI.
+  * Dentro da tabela do modal, procura cada EPI pelo texto.
+  * Marca a checkbox correspondente.
+  * Confirma.
+  * Trata popup de erro se o sistema exigir “código de EPI não pode ser vazio”.
+  * Aguarda o fechamento do modal.
+
+**Remoção de excedentes:**
+
+* Se existirem excedentes:
+
+  * Para cada EPI excedente:
+
+    * Localiza o EPI na tabela da categoria.
+    * Clica na linha.
+    * Pressiona o botão “-” da categoria.
+    * Aguarda a atualização (linha some / tabela recarrega).
+* Se o item não for encontrado:
+
+  * Loga um aviso e segue para o próximo (não aborta).
+
+---
+
+## 10. Confirmação final e idempotência
+
+### 10.1. Confirmação geral
+
+Ao final de todos os preenchimentos:
+
+* Volta ao rodapé da etapa.
+* Clica em “Confirmar” (rodapé).
+* Esta confirmação grava:
+
+  * QPT.
+  * EPI adicional.
+  * Análise Ambiental.
+  * APN-1.
+  * EPIs vinculados.
+
+Não há “salvar parcial” intermediário – o conceito é:
+
+> Monta plano → aplica → um único Confirmar.
+
+---
+
+### 10.2. Idempotência prática
+
+Se você rodar o script **novamente** na mesma etapa, com o mesmo contexto:
+
+* As respostas do QPT, EPI adicional, AA e APN-1 já vão bater com o plano.
+* Na aba EPI:
+
+  * Itens faltantes serão zero.
+  * Itens excedentes serão zero (ou apenas alguns residuais que não puderam ser removidos por inconsistência de texto).
+* Resultado: a segunda execução é quase só leitura + verificação, com mínima modificação.
+
+Isso é importante para:
+
+* Auditar o comportamento.
+* Rodar o script em rotina sem medo de “estragar” uma etapa já bem configurada.
+
+---
+
+## 11. Esquema mental resumido (em forma de mapa lógico)
+
+Se alguém te perguntar em 30 segundos “como a lógica do APLATQUENTE decide tudo?”, o resumo é:
+
+1. **Filtro de escopo**
+   Só mexe em etapas cujo Tipo Trabalho = “Trabalho a Quente”.
+
+2. **Leitura da realidade**
+   Lê descrição + características e identifica contextos (cordas, altura, sobre o mar, agulheiro, pneumático, elétrico…).
+
+3. **Tradução em plano de segurança**
+   A partir desses contextos, define:
+
+   * Respostas de Questionário PT (mudança? isolamentos? inspeções?).
+   * Necessidade de EPI adicional (cinto, colete, dupla proteção, protetor facial).
+   * APN-1 (quais riscos “elevados” justificam S/N).
+   * EPIs vinculados por categoria (quais EPIs têm que estar lá e quais devem sair).
+   * Análise Ambiental (neste modelo, tudo “Não” para Trabalho a Quente).
+
+4. **Execução na tela**
+   Vai em cada aba, aplica o plano, e dá um único Confirmar ao final.
+
+5. **Idempotente**
+   Se rodar de novo, o sistema praticamente só verifica e faz pequenos ajustes, porque o plano alvo já está todo refletido na etapa.
+
+
+
+
+**************************************************************************************************
+*********************************************************************************************************************************************
+*********************************************************************************************************************************************
+*********************************************************************************************************************************************
+*********************************************************************************************************************************************
+*******************************************
+
+
+
+
+
+
+
+log atual: (.venv) PS C:\Users\D9J8\PycharmProjects\pythonProject> python aplatquente.py --data 11/12/2025 --valor 16/240/2023 --use-keyring --user d9j8 --log log_aplatquente.txt --debug-locators
+[INFO] Log TXT ativado. Arquivo: log_aplatquente.txt
+[INFO] Iniciando aplatquente.py (plano + preenchimento QPT / EPI adicional / AA / APN-1 / EPI).
+[INFO] DEBUG_LOCATORS ativado: serão registrados detalhes de XPaths / localizadores.
+[INFO] Usando msedgedriver local: .venv/msedgedriver.exe
+[INFO] Acessando APLAT: https://aplat.petrobras.com.br/#/permissaotrabalho/P-18/planejamento/programacaodiaria
+[TIMER] Document ready: 0.008s
+[LOGIN] Tentando login automático para usuário: d9j8
+[LOGIN] Submit via botão: //button[contains(.,'Sign in') or contains(.,'Login')]
+[INFO] Login realizado com sucesso (keyring).
+[TIMER] attempt_auto_login: 5.839s
+[TIMER] Document ready: 0.010s
+
+======================================================================
+[INFO] Iniciando análise da etapa 1/1: 16/240/2023 (data 11/12/2025)
+======================================================================
+[INFO] Iniciando pesquisa para etapa: 16/240/2023
+[CLICK] //button[normalize-space()='Exibir opções']
+[INFO] Campo data preenchido: 11/12/2025
+[INFO] Campo número etapa preenchido: 16/240/2023
+[CLICK] //button[normalize-space()='Pesquisar']
+[INFO] Aguardando resultados da pesquisa (até 30s)...
+[INFO] Resultado aberto (XPath: (//ul[contains(@class,'list-group')]//li[contains(@class,'listagem')])[1])
+[TIMER] perform_search: 9.344s
+[TIMER] perform_search: 10.495s
+[CLICK] Navegado para aba: Dados da Etapa
+[TIMER] goto_tab: 0.764s
+[INFO] Tipo Trabalho selecionado: value='2', texto='Trabalho a Quente'
+[WARN] Não foi possível ler 'Tipo de Etapa': Message: no such element: Unable to locate element: {"method":"xpath","selector":".//input[@type='radio' and @checked]"}
+  (Session info: MicrosoftEdge=143.0.3650.66); For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#nosuchelementexception
+Stacktrace:
+Symbols not available. Dumping unresolved backtrace:
+        0x7ff632c99435
+        0x7ff632c09aa4
+        0x7ff632ff2d12
+        0x7ff632a62d9e
+        0x7ff632a62ffb
+        0x7ff632a5a33c
+        0x7ff632a5a2e5
+        0x7ff632a5a1fd
+        0x7ff632a5a2e5
+        0x7ff632a9c8de
+        0x7ff632a5982a
+        0x7ff632a58b33
+        0x7ff632a59653
+        0x7ff632b41d64
+        0x7ff632b50b1c
+        0x7ff632b4a6ff
+        0x7ff632d2a7f7
+        0x7ff632c15306
+        0x7ff632c0f714
+        0x7ff632c0f859
+        0x7ff632c0391d
+        0x7ffadff8e8d7
+        0x7ffae0e8c53c
+
+[DEBUG] Descrição obtida usando XPath: //app-dados-da-etapa//textarea[contains(@formcontrolname,'descricao')]
+[TIMER] coletar_descricao: 0.020s
+[DEBUG] Características encontradas (Método 1): Espaço Confinado, Altura - Acesso por Cordas, Parafusadeira e Torqueadeira
+[TIMER] coletar_caracteristicas_trabalho: 0.044s
+[INFO] Tipo Trabalho selecionado: value='2', texto='Trabalho a Quente'
+
+--------------------------------------------------------------------------------
+[PLANO] Etapa 16/240/2023 | Data: 11/12/2025 | Tipo de Trabalho: Trabalho a Quente
+--------------------------------------------------------------------------------
+[INFO] Descrição (len=243):
+       MISTRAS - ESPAÇO CONFINADO - ABERTURA E FECHAMENTO DE ELIPSE E INSPEÇÃO DE END NO INTERIOR DO SEWAGE TREAT ROOM/TRATAMENTO ESGOTO SANITÁRIO (COLUNA "C" - PR/BB), COM USO DE PARAFUSADEIRA E FERRAMENTAS MANUAIS (ACESSO POR CORDAS). OM2027492156.
+[INFO] Características do trabalho / Observações:
+       Espaço Confinado, Altura - Acesso por Cordas, Parafusadeira e Torqueadeira
+
+[CONTEXTOS DETECTADOS]
+  - tem_acesso_cordas = True
+  - tem_altura = True
+  - tem_espaco_confinado = True
+
+[EPI (RÁDIOS PRINCIPAIS) – PLANO ESPERADO]
+  Q001: resp='Sim' | Cinto de Segurança
+  Q002: resp='Não' | Ventilação Forçada
+  Q003: resp='Não' | Colete Salva-vidas
+  Q004: resp='Não' | Iluminação p/ uso em área classificada (tipo Ex)
+  Q005: resp='Sim' | Dupla Proteção Auricular
+  Q006: resp='Não' | Protetor Facial
+
+[EPIs VINCULADOS POR CATEGORIA – PLANO ESPERADO]
+  Categoria: Luvas
+    - LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')
+  Categoria: Proteção Respiratória
+    - NÃO APLICÁVEL
+  Categoria: Vestimentas
+    - BOTA CANO ALTO
+    - CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y
+    - CINTO DE SEG. TP PARA-QUEDISTA
+    - CINTO DE SEGURANÇA PARA RESGATE
+    - DUPLA PROTEÇÃO AUDITIVA
+    - DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA
+    - EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)
+    - MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS
+  Categoria: Óculos
+    - ÓCULOS SEGURANÇA CONTRA IMPACTO
+
+[QUESTIONÁRIO PT – PLANO ESPERADO]
+  Q001: resp='Não' | O trabalho a ser realizado é caracterizado como uma mudança?
+  Q001: resp='Não' | Permanência do Operador no Local de Trabalho?
+  Q002: resp='Sim' | Acompanhamento Periódico? (Em caso de Acompanhamento Periódico, efetuar verificações de ____em___horas)
+  Q002: resp='NA' | As manobras, bloqueios e isolamentos foram executados conforme o plano de isolamento?
+  Q003: resp='NA' | O equipamento foi drenado e/ou lavado e/ou limpo e/ou ventilado ?
+  Q004: resp='NA' | O equipamento está corretamente sinalizado com etiquetas de advertência ?
+  Q005: resp='NA' | Foram realizadas inspeções prévias nos equipamentos elétricos (luminárias, quadros, painéis, conexões, cabos, etc) e os cabos elétricos estão supensos?
+  Q006: resp='NA' | Caso os sistemas e equipamentos de combate a incêndio do local onde será executado o trabalho não estejam em condições normais de operação, foram definidas salvaguardas?
+  Q007: resp='NA' | As mangueiras de ar comprimido possuem engates rápidos compatíveis e os mesmos estão travados
+  Q008: resp='Sim' | O local foi isolado, sinalizado e o pessoal desnecessário  afastado ?
+  Q009: resp='NA' | Foi providenciada a contenção de fagulhas com mantas e materiais adequados?
+  Q010: resp='NA' | Caso o equipamento esteja acoplado a equipamento elétrico (ex: motor elétrico),  foram tomadas precauções quanto à energização acidental do equipamento ?
+  Q011: resp='NA' | Foi providenciado Tamponamentos de drenos, ralos, vents e outras aberturas próximas ao local do trabalho?
+  Q012: resp='Não' | A execução deste trabalho pode causar Risco de Perda de Produção?
+  Q013: resp='NA' | Caso necessário inibir sensores do sistema de detecção de fogo e gás, foram definidas salvaguardas para suprir a inibição?
+  Q014: resp='NA' | O observador foi instruído quanto a utilização dos equipamentos de combate a incêndio?
+
+[APN-1 – PLANO ESPERADO]
+  Questões com resposta 'Sim':
+    Q006: 'Sim'
+    Q007: 'Sim'
+  Questões com resposta 'Não':
+    Q001: 'Não'
+    Q002: 'Não'
+    Q003: 'Não'
+    Q004: 'Não'
+    Q005: 'Não'
+    Q008: 'Não'
+    Q009: 'Não'
+    Q010: 'Não'
+    Q011: 'Não'
+    Q012: 'Não'
+    Q013: 'Não'
+    Q014: 'Não'
+    Q015: 'Não'
+    Q016: 'Não'
+    Q017: 'Não'
+    Q018: 'Não'
+    Q019: 'Não'
+    Q020: 'Não'
+
+[ANÁLISE AMBIENTAL – PLANO ESPERADO]
+  Todas as questões devem ser respondidas com 'Não' (regra fixa para Trabalho a Quente).
+--------------------------------------------------------------------------------
+
+
+[STEP] Processando Questionário PT...
+[STEP] Preenchendo aba 'Questionário PT'...
+[CLICK] Navegado para aba: Questionário PT
+[TIMER] goto_tab: 0.279s
+[TIMER] Document ready: 0.011s
+[INFO] Respondendo Q001: 'O trabalho a ser realizado é caracterizado como uma mudança?...' com 'Não'
+[DEBUG] Marcando resposta: 'Não' -> normalizada: 'NAO' -> alvo: 'Não'
+[DEBUG] Encontrados 2 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Clicando no input para: 'Não' (ID: GER_2199_1_211_1)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'Não' marcada com sucesso
+[WARN] Popup de Mudança: botão 'Sim' não encontrado dentro de 1s.
+[INFO] Respondendo Q001: 'Permanência do Operador no Local de Trabalho?...' com 'Não'
+[DEBUG] Marcando resposta: 'Não' -> normalizada: 'NAO' -> alvo: 'Não'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Clicando no input para: 'Não' (ID: ADC_2199_34_107_1)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'Não' marcada com sucesso
+[INFO] Respondendo Q002: 'Acompanhamento Periódico? (Em caso de Acompanhamento Periódico, efetua...' com 'Sim'
+[DEBUG] Marcando resposta: 'Sim' -> normalizada: 'SIM' -> alvo: 'Sim'
+[DEBUG] Encontrados 2 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Clicando no input para: 'Sim' (ID: ADC_2199_113_300_0)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'Sim' marcada com sucesso
+[INFO] Respondendo Q002: 'As manobras, bloqueios e isolamentos foram executados conforme o plano...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_110_319_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q003: 'O equipamento foi drenado e/ou lavado e/ou limpo e/ou ventilado ?...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_4_85_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q004: 'O equipamento está corretamente sinalizado com etiquetas de advertênci...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_5_83_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q005: 'Foram realizadas inspeções prévias nos equipamentos elétricos (luminár...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_111_320_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q006: 'Caso os sistemas e equipamentos de combate a incêndio do local onde se...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_109_318_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q007: 'As mangueiras de ar comprimido possuem engates rápidos compatíveis e o...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_9_60_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q008: 'O local foi isolado, sinalizado e o pessoal desnecessário afastado ?...' com 'Sim'
+[DEBUG] Marcando resposta: 'Sim' -> normalizada: 'SIM' -> alvo: 'Sim'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Clicando no input para: 'Sim' (ID: GER_2199_11_88_0)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'Sim' marcada com sucesso
+[INFO] Respondendo Q009: 'Foi providenciada a contenção de fagulhas com mantas e materiais adequ...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_107_316_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q010: 'Caso o equipamento esteja acoplado a equipamento elétrico (ex: motor e...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_16_61_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q011: 'Foi providenciado Tamponamentos de drenos, ralos, vents e outras abert...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_86_290_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q012: 'A execução deste trabalho pode causar Risco de Perda de Produção?...' com 'Não'
+[DEBUG] Marcando resposta: 'Não' -> normalizada: 'NAO' -> alvo: 'Não'
+[DEBUG] Encontrados 2 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Clicando no input para: 'Não' (ID: GER_2199_87_291_1)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'Não' marcada com sucesso
+[INFO] Respondendo Q013: 'Caso necessário inibir sensores do sistema de detecção de fogo e gás, ...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_108_317_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+[INFO] Respondendo Q014: 'O observador foi instruído quanto a utilização dos equipamentos de com...' com 'NA'
+[DEBUG] Marcando resposta: 'NA' -> normalizada: 'NA' -> alvo: 'NA'
+[DEBUG] Encontrados 3 spans de opções
+[DEBUG] Opção encontrada: 'Sim'
+[DEBUG] Opção encontrada: 'Não'
+[DEBUG] Opção encontrada: 'NA'
+[DEBUG] Clicando no input para: 'NA' (ID: GER_2199_112_321_2)
+[DEBUG] Estratégia 1 funcionou
+[OK] Resposta 'NA' marcada com sucesso
+
+[RESUMO] Questionário PT:
+  • Total de questões: 16
+  • Marcadas com sucesso: 16
+  • Falhas: 0
+  • Taxa de sucesso: 100.0%
+[CLICK] Botão 'Confirmar' do Questionário PT acionado
+[TIMER] preencher: 13.881s
+[INFO] Questionário PT concluído
+[TIMER] preencher_questionario_pt: 13.882s
+
+[STEP] Processando Fechar modais...
+
+[STEP] Processando EPI adicional...
+
+[DEBUG][EPI] ===== INÍCIO preencher_epi_adicional =====
+[DEBUG][EPI] epi_radios_plano (raw): {('Q001', 'Cinto de Segurança'): 'Sim', ('Q002', 'Ventilação Forçada'): 'Não', ('Q003', 'Colete Salva-vidas'): 'Não', ('Q004', 'Iluminação p/ uso em área classificada (tipo Ex)'): 'Não', ('Q005', 'Dupla Proteção Auricular'): 'Sim', ('Q006', 'Protetor Facial'): 'Não'}
+[STEP] Preenchendo EPI adicional...
+[CLICK] Navegado para aba: EPI
+[TIMER] goto_tab: 0.219s
+[DEBUG][EPI] Containers EPI encontrados (raw XPATH): 1
+[DEBUG][EPI] Container EPI (preview HTML): <div _ngcontent-ng-c3786019781="" id="EPI" class="ng-star-inserted"><h4 _ngcontent-ng-c3786019781="">EPI adicional necessário e proteções</h4><hr _ngcontent-ng-c3786019781=""><div _ngco
+ntent-ng-c3786019781="" class="row ng-star-inserted" id="questao_1"><div _ngcontent-ng-c3786019781="" class="form-group col-sm-1 ordem ng-star-inserted"> 001 </div><!----><!----><div _ngcontent-ng-c3786019781="" class="form-group pergunta pergunta-par col-md-7">Cinto de Segurança</div><div _ngcontent-ng-c378601978
+[DEBUG][EPI] mapa_respostas extraído: {'Q001': 'SIM', 'Q002': 'NÃO', 'Q003': 'NÃO', 'Q004': 'NÃO', 'Q005': 'SIM', 'Q006': 'NÃO'}
+[INFO][EPI] EPI adicional: 6 questões encontradas dentro do container EPI
+[DEBUG][EPI] Questão Q001: 'Cinto de Segurança...' → resposta esperada: SIM
+[DEBUG][EPI] MARCAR Q001 → 'Sim' | Cinto de Segurança...
+[INFO][EPI] EPI adicional Q001: 'Sim' | Cinto de Segurança...
+[DEBUG][EPI] Questão Q002: 'Ventilação Forçada...' → resposta esperada: NÃO
+[DEBUG][EPI] MARCAR Q002 → 'Não' | Ventilação Forçada...
+[INFO][EPI] EPI adicional Q002: 'Não' | Ventilação Forçada...
+[DEBUG][EPI] Questão Q003: 'Colete Salva-vidas...' → resposta esperada: NÃO
+[DEBUG][EPI] MARCAR Q003 → 'Não' | Colete Salva-vidas...
+[INFO][EPI] EPI adicional Q003: 'Não' | Colete Salva-vidas...
+[DEBUG][EPI] Questão Q004: 'Iluminação p/ uso em área classificada (tipo Ex)...' → resposta esperada: NÃO
+[DEBUG][EPI] MARCAR Q004 → 'Não' | Iluminação p/ uso em área classificada (tipo Ex)...
+[INFO][EPI] EPI adicional Q004: 'Não' | Iluminação p/ uso em área classificada (tipo Ex)...
+[DEBUG][EPI] Questão Q005: 'Dupla Proteção Auricular...' → resposta esperada: SIM
+[DEBUG][EPI] MARCAR Q005 → 'Sim' | Dupla Proteção Auricular...
+[INFO][EPI] EPI adicional Q005: 'Sim' | Dupla Proteção Auricular...
+[DEBUG][EPI] Questão Q006: 'Protetor Facial...' → resposta esperada: NÃO
+[DEBUG][EPI] MARCAR Q006 → 'Não' | Protetor Facial...
+[INFO][EPI] EPI adicional Q006: 'Não' | Protetor Facial...
+[INFO][EPI] EPI adicional concluído
+[TIMER] preencher: 1.311s
+[DEBUG][EPI] ===== FIM preencher_epi_adicional =====
+
+[TIMER] preencher_epi_adicional: 1.331s
+
+[STEP] Processando Análise Ambiental...
+[STEP] Preenchendo Análise Ambiental...
+[CLICK] Navegado para aba: Análise Ambiental
+[TIMER] goto_tab: 0.234s
+[DEBUG][AMB] Container encontrado com: //div[@id='AMB']
+[DEBUG][AMB] Encontradas 5 linhas de questões
+[INFO][AMB] Questão 1: 'Líquido Inflamável' → Não [OK]
+[INFO][AMB] Questão 2: 'Líquido corrosivo' → Não [OK]
+[INFO][AMB] Questão 3: 'Gás Tóxico ( ppm )' → Não [OK]
+[INFO][AMB] Questão 4: 'Sólido combustíveis' → Não [OK]
+[INFO][AMB] Questão 5: 'Gás combustíveis ( %LIE )' → Não [OK]
+[INFO] Análise Ambiental: 5/5 questões marcadas como 'Não'
+[TIMER] preencher: 2.096s
+[TIMER] preencher_analise_ambiental: 2.096s
+
+[STEP] Processando APN-1...
+[STEP] Preenchendo APN-1 (análise dinâmica por texto)...
+[CLICK] Navegado para aba: APN-1
+[TIMER] goto_tab: 0.212s
+[DEBUG][APN1] Contexto normalizado: MISTRAS - ESPACO CONFINADO - ABERTURA E FECHAMENTO DE ELIPSE E INSPECAO DE END NO INTERIOR DO SEWAGE TREAT ROOM/TRATAMENTO ESGOTO SANITARIO (COLUNA "C" - PR/BB), COM USO DE PARAFUSADEIRA E FERRAMENTAS...
+[DEBUG][APN1] Encontradas 44 perguntas com XPath: //div[starts-with(@id,'questao_')]
+[INFO] APN-1: 17 perguntas coletadas
+[INFO] P001 → Não | 'A execução deste trabalho implica em alteração nas...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P002 → Não | 'Durante a execução deste trabalho pode haver conta...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P003 → Não | 'Durante a execução deste trabalho haverá intervenç...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P004 → Não | 'Durante a execução deste trabalho haverá intervenç...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P005 → Não | 'A execução deste trabalho pode interferir na segur...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P006 → Não | 'Este trabalho será executado no interior de espaço...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P007 → Não | 'Este trabalho será executado em altura acima de 2m...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P008 → Não | 'Este trabalho será executado sobre o mar?...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P009 → Não | 'Este trabalho será executado em local com risco de...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P010 → Não | 'O trabalho envolverá chama aberta (solda, corte, e...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P011 → Não | 'Os equipamentos/ferramentas utilizados na execução...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P012 → Não | 'Este trabalho envolve o uso de fonte de radiação i...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P013 → Não | 'O trabalho envolverá a abertura de equipamento ou ...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P014 → Não | 'O trabalho será realizado em equipamento ou sistem...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P015 → Não | 'O trabalho envolve operações de mergulho?...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P016 → Não | 'O trabalho é de hidrojateamento?...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[INFO] P017 → Não | 'Durante a execução do trabalho pode haver aproxima...'
+[DEBUG][APN1] Resposta 'Não' marcada via JavaScript
+[DONE] APN-1 finalizado: 17 sucessos, 0 falhas
+[TIMER] preencher: 4.438s
+[TIMER] preencher_apn1: 4.438s
+
+[STEP] Processando EPI...
+[STEP] Processando aba 'EPI'...
+[CLICK] Navegado para aba: EPI
+[TIMER] goto_tab: 0.277s
+
+[EPI] Processando categoria: Vestimentas
+[INFO] Categoria - 7 item(s) encontrado(s)
+[EPI] Vestimentas - Comparação:
+  Esperados (8): ['BOTA CANO ALTO', 'CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y', 'CINTO DE SEG. TP PARA-QUEDISTA', 'CINTO DE SEGURANÇA PARA RESGATE', 'DUPLA PROTEÇÃO AUDITIVA', 'DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA', 'EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)', 'MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS']
+  Atuais    (7): ['BOTA CANO ALTO', 'CAPACETE S/ABAS C/ CARNEIRA E PRESILHA DE QUEIXO EM Y', 'CINTO DE SEG. TP PARA-QUEDISTA', 'CINTO DE SEGURANÇA PARA RESGATE', 'DUPLA PROTEÇÃO AUDITIVA', 'DUPLO TALABARTE EM Y OU LINHA DE VIDA CONJUGADA TRAVA QUEDA', 'MACACÃO COM GOLA TIPO PADRE E BOLSOS FECHADOS']
+  Faltantes (1):
+    • EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)
+[EPI] Incluindo 1 item(s) em 'Vestimentas'
+[CLICK] Modal de associação aberto para 'Vestimentas'
+[EPI] Item marcado: 'EPI´s OBRIGATÓRIOS (CAPACETE, BOTA, PROT. AURIC. E UNIFORME)' (encontrado com busca flexível)
+[CLICK] Modal confirmado
+[INFO] Modal fechado
+
+[EPI] Processando categoria: Óculos
+[INFO] Categoria - 1 item(s) encontrado(s)
+[EPI] Óculos - Comparação:
+  Esperados (1): ['ÓCULOS SEGURANÇA CONTRA IMPACTO']
+  Atuais    (1): ['ÓCULOS SEGURANÇA CONTRA IMPACTO']
+
+[EPI] Processando categoria: Luvas
+[INFO] Categoria - 1 item(s) encontrado(s)
+[EPI] Luvas - Comparação:
+  Esperados (1): ["LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')"]
+  Atuais    (1): ["LUVA DE PROTEÇÃO CONTRA IMPACTOS MODELO II (3, 4, 3, 3, 'C', 'P')"]
+
+[EPI] Processando categoria: Proteção Respiratória
+[INFO] Categoria - 1 item(s) encontrado(s)
+[EPI] Proteção Respiratória - Comparação:
+  Esperados (1): ['NÃO APLICÁVEL']
+  Atuais    (1): ['NÃO APLICÁVEL']
+[INFO] Aba EPI processada
+[TIMER] processar: 4.686s
+[TIMER] processar_aba_epi: 4.686s
+[INFO] Efetuando confirmação geral da etapa no rodapé...
+[CLICK] MessageBox fechado
+[CLICK] Botão Confirmar acionado
+[TIMER] processar_etapa: 42.859s
+[INFO] Processo concluído (plano + preenchimento QPT / EPI adicional / AA / APN-1 / EPI).
+Pressione ENTER para encerrar e fechar o navegador
+
+Repare que em apn1 o termo usado é espaços confinados. então o código deve incluir essa palavra chave também, veja: 
+Análise Preliminar de Nível 1
+001A execução deste trabalho implica em alteração nas condições operacionais, de forma não prevista em análise de risco e procedimento pré-estabelecido, que possa acarretar parada de sistemas de segurança ou provocar emergência?
+SimNão
+002Durante a execução deste trabalho pode haver contato com temperatura extrema em equipamentos ou sistemas sem proteção térmica?
+SimNão
+003Durante a execução deste trabalho haverá intervenção em circuito de controle ou de proteção de painéis elétricos essenciais?
+SimNão
+004Durante a execução deste trabalho haverá intervenção em circuito pertencente a sistema de no-break ou de corrente contínua crítico que causará a indisponibilidade do sistema?
+SimNão
+005A execução deste trabalho pode interferir na segurança operacional de outras áreas de operação?
+SimNão
+006Este trabalho será executado no interior de espaços confinados?
+SimNão
+007Este trabalho será executado em altura acima de 2m e com risco de queda, conforme NR-35, de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+008Este trabalho será executado sobre o mar?
+SimNão
+009Este trabalho será executado em local com risco de presença de H2S, de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+010O trabalho envolverá chama aberta (solda, corte, esmerilhamento) em área classificada ou em equipamento classe A ou em equipamento classe B interligado a equipamento classe A?
+SimNão
+011Os equipamentos/ferramentas utilizados na execução deste trabalho e/ou a realização do mesmo oferecem riscos de gerar centelhas, faíscas ou eletricidade estática quando forem utilizados em área classificada, de forma não prevista em análise de risco e procedimento de trabalho rotineiro pré-estabelecido?
+NOTA: Trabalhos rotineiros cujos cuidados já estejam cobertos por PTRE ou TRBR específica, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+012Este trabalho envolve o uso de fonte de radiação ionizante?
+SimNão
+013O trabalho envolverá a abertura de equipamento ou linha, ou será realizado em equipamentos e sistemas pressurizados, de forma que sejam necessárias medidas de segurança adicionais à Matriz de Risco e Plano de Isolamento do PE1PBR00212?
+Exemplos de trabalhos com riscos não totalmente cobertos pelos documentos do PE-1PBR-00212:
+
+abertura de equipamento com possibilidade de pressão trapeada;
+ abertura de equipamento com sulfeto de ferro e possibilidade de combustão expontânea.
+NOTA: Trabalhos cujos cuidados sejam cobertos pelos documentos do PE1PBR00212, não necessitam APN2 adicional. Nesse caso a resposta para esse item é 'NÃO'.
+
+SimNão
+014O trabalho será realizado em equipamento ou sistema elétrico, com possibilidade de choque elétrico ou formação de arco elétrico, de forma que sejam necessárias medidas de segurança adicionais à Matriz de Risco, Plano de Isolamento ou Matriz de Trabalho Energizado do PE1PBR00213?
+NOTA: Trabalhos cujos cuidados sejam cobertos pelos documentos do PE1PBR00213, não necessitam APN2 adicional. Nesse caso a resposta para esse item é "NÃO".
+
+SimNão
+015O trabalho envolve operações de mergulho?
+SimNão
+016O trabalho é de hidrojateamento?
+SimNão
+017Durante a execução do trabalho pode haver aproximação do executante com partes móveis expostas de máquinas ou equipamentos?
+SimNão
+
+
+
+
+
+
+
+
+
