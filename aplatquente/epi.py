@@ -80,6 +80,10 @@ def aplicar_epi_por_categoria(driver, epis_categorias: Dict[str, Iterable[str]],
 
             # 1) checkbox imediatamente associado a label contendo o item
             candidatos = [
+                # 0) tabela com checkbox na primeira coluna e texto do item em <td>
+                f"//tr[.//td[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyzáàâãéèêíìîóòôõúùûç', 'ABCDEFGHIJKLMNOPQRSTUVWXYZAAAAEEEIIIOOOOUUUC'), '{itn}')]]"
+                f"//input[@type='checkbox']",
+
                 f"//label[contains(translate(normalize-space(.), 'abcdefghijklmnopqrstuvwxyzáàâãéèêíìîóòôõúùûç', 'ABCDEFGHIJKLMNOPQRSTUVWXYZAAAAEEEIIIOOOOUUUC'), '{itn}')]"
                 f"/preceding-sibling::input[@type='checkbox']",
 
