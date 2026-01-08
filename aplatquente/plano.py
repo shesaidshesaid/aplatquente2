@@ -361,7 +361,7 @@ _APN1_PATTERNS: List[Tuple[str, str]] = [
     ("intervencao_controle_ou_protecao_paineis", r"INTERVENCAO EM CIRCUITO DE CONTROLE|INTERVENÇÃO EM CIRCUITO DE CONTROLE|CIRCUITO DE PROTECAO.*PAINEIS ELETRICOS|CIRCUITO DE PROTEÇÃO.*PAIN[ÉE]IS EL[ÉE]TRIC"),
     ("intervencao_nobreak_cc_critico", r"NO-?BREAK|CORRENTE CONTINUA CRITIC|CORRENTE CONTÍNUA CR[ÍI]TIC"),
     ("interfere_outras_areas", r"INTERFERIR NA SEGURANCA OPERACIONAL DE OUTRAS AREAS|INTERFERIR NA SEGURANÇA OPERACIONAL DE OUTRAS ÁREAS"),
-    ("espaco_confinado", r"ESPACO CONFINADO|ESPAÇO CONFINADO"),
+    ("espaco_confinado", r"ESPACOS? CONFINAD[OA]S?|ESPAÇOS? CONFINAD[OA]S?"),
     ("altura_nr35", r"NR-35|TRABALHO EM ALTURA|ALTURA ACIMA DE 2M|ACIMA DE 2M"),
     ("sobre_o_mar", r"SOBRE O MAR"),
     ("risco_h2s", r"\bH2S\b|PRESENCA DE H2S|PRESENÇA DE H2S"),
@@ -417,6 +417,11 @@ def coletar_apn1_itens(driver: Driver, timeout: float) -> List[Dict[str, Any]]:
             pergunta = row.find_element(By.XPATH, ".//div[contains(@class,'pergunta')]").text.strip()
         except Exception:
             pergunta = (row.text or "").strip()
+        if not pergunta:
+            try:
+                pergunta = (row.get_attribute("textContent") or "").strip()
+            except Exception:
+                pass
 
         pergunta_norm = normalizar_texto(pergunta)
 
