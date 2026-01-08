@@ -553,7 +553,6 @@ def gerar_plano_trabalho_quente(driver: Driver, timeout: float, regras_path: Opt
             apn1_por_ordem[ordem] = it.get("resposta_planejada", "Não")
 
     return {
-        "epi_radios": epi_radios,
         "epi_radios_ordem": epi_radios_ordem,
         "regras_path": regras["regras_path"],
         "descricao": descricao,
@@ -573,8 +572,7 @@ def gerar_plano_trabalho_quente(driver: Driver, timeout: float, regras_path: Opt
 def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     """
     Aplica o plano gerado preenchendo as abas relevantes.
-    Regra operacional: cada rotina deve clicar em Confirmar e aguardar salvar antes
-    de trocar de aba.
+    Regra operacional: cada rotina de preenchimento já confirma a aba antes de trocar.
     """
 
     resultado: Dict[str, Any] = {
@@ -598,25 +596,17 @@ def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, An
         resultado["warnings"].append(f"Imports de preenchimento/epi falharam: {e}")
         return resultado
 
-    def _confirmar(complemento: str) -> None:
-        try:
-            clicar_botao_confirmar_rodape(driver, timeout)
-        except Exception as e:  # pragma: no cover - robustez
-            resultado["warnings"].append(f"Confirmar após {complemento} falhou: {e}")
-
     # 1) Questionário PT
     try:
         qpt = plano.get("qpt", {}) or plano.get("questionario_pt", {}) or {}
         if qpt:
             resultado["qpt"] = preencher_questionario_pt(driver, qpt, timeout)
-            _confirmar("Questionário PT")
     except Exception as e:
         resultado["warnings"].append(f"Questionário PT não aplicado: {e}")
 
     # 2) Análise Ambiental
     try:
         resultado["analise_ambiental"] = preencher_analise_ambiental(driver, timeout)
-        _confirmar("Análise Ambiental")
     except Exception as e:
         resultado["warnings"].append(f"Análise Ambiental não aplicada: {e}")
 
@@ -628,7 +618,6 @@ def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, An
             epi_rad_payload.update(plano.get("epi_radios_ordem", {}) or epi_radios_para_ordem(epi_rad_raw))
 
             resultado["epi_radios"] = preencher_epi_adicional(driver, epi_rad_payload, timeout)
-            _confirmar("EPI adicional")
     except Exception as e:
         resultado["warnings"].append(f"EPI adicional não aplicado: {e}")
 
@@ -638,7 +627,6 @@ def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, An
         epi_cat = plano.get("epis_cat", {}) or plano.get("epi_categoria", {}) or {}
         if epi_cat:
             resultado["epi_cat"] = processar_aba_epi(driver, epi_cat, timeout)
-            _confirmar("EPI por categoria")
     except Exception as e:
         resultado["warnings"].append(f"EPI por categoria não aplicada: {e}")
 
@@ -647,7 +635,6 @@ def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, An
         desc = plano.get("descricao", "") or ""
         carac = plano.get("caracteristicas", "") or ""
         resultado["apn1"] = preencher_apn1(driver, timeout, desc, carac)
-        _confirmar("APN-1")
     except Exception as e:
         resultado["warnings"].append(f"APN-1 não aplicada: {e}")
 
