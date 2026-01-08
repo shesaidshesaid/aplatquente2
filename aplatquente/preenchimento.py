@@ -26,6 +26,8 @@ from aplatquente.plano import (
 )
 
 
+import re
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -39,16 +41,23 @@ def _norm(s: str) -> str:
     return s
 
 
-def _resp_norm(resp: str) -> str:
-    r = _norm(resp)
-    # normaliza variantes comuns
-    if r in ("NAO", "NÃO"):
-        return "NAO"
-    if r in ("SIM",):
+def _resp_norm(v: str) -> str:
+    """
+    Normaliza para: 'SIM', 'NAO', 'NA'
+    """
+    n = _norm(v)
+
+    if n in ("SIM", "S", "YES", "Y", "TRUE", "1"):
         return "SIM"
-    if r in ("NA", "N/A", "N A"):
+
+    if n in ("NAO", "NÃO", "N", "NO", "FALSE", "0"):
+        return "NAO"
+
+    if n in ("NA", "N/A", "N A", "NAO APLICAVEL", "NÃO APLICÁVEL", "NAO SE APLICA", "NÃO SE APLICA"):
         return "NA"
-    return r
+
+    # fallback: mantém n (mas o resto do código espera SIM/NAO/NA)
+    return n
 
 
 def _click(driver, el: WebElement) -> bool:
@@ -62,186 +71,150 @@ def _click(driver, el: WebElement) -> bool:
             return False
 
 
-def _find_row_by_codigo(driver, codigo: str) -> Optional[WebElement]:
+def _parse_key_to_ordem(key: str) -> tuple[Optional[str], bool, str]:
     """
-    Tenta localizar uma 'linha' de pergunta por código (Q001 etc.).
-    Pode ser TR (tabela) ou DIV/ROW.
+    (ordem_3dig, is_ordem_explicita, hint)
+      - 'Q001_MUDANCA' -> ('001', False, 'MUDANCA')
+      - 'Q001'         -> ('001', False, '')
+      - '001'          -> ('001', True, '')
     """
-    codigo = codigo.strip()
-    if not codigo:
-        return None
+    raw = (key or "").strip()
+    if not raw:
+        return None, False, ""
 
-    candidatos = [
-        # tabela
-        f"//tr[.//td[contains(normalize-space(.), '{codigo}')]]",
-        f"//tr[contains(normalize-space(.), '{codigo}')]",
-        # div genérico
-        f"//div[contains(normalize-space(.), '{codigo}') and .//input[@type='radio']][1]",
-        f"//*[contains(normalize-space(.), '{codigo}') and .//input[@type='radio']][1]",
-    ]
-    for xp in candidatos:
-        el = safe_find_element(driver, xp, timeout=1.5)
-        if el:
-            return el
-    return None
-
-
-def _find_row_by_hint_text(driver, hint: str) -> Optional[WebElement]:
-    """
-    Fallback: localizar linha pela parte textual (ex.: 'ACOMP', 'MUDANCA', etc.).
-    """
+    head, hint = (raw.split("_", 1) + [""])[:2] if "_" in raw else (raw, "")
+    head_u = head.strip().upper()
     hint = hint.strip()
-    if not hint:
+
+    m = re.match(r"^Q(\d{3})", head_u)
+    if m:
+        return m.group(1), False, hint
+
+    m = re.match(r"^(\d{3})$", head_u)
+    if m:
+        return m.group(1), True, hint
+
+    return None, False, hint
+
+
+def _index_rows_by_ordem(driver) -> Dict[str, WebElement]:
+    """
+    Indexa rows com radio e uma 'ordem' (001..).
+    Funciona tanto em div#questao_* quanto em tr.
+    """
+    # tenta divs do padrão questao_*
+    rows: List[WebElement] = []
+    try:
+        rows = driver.find_elements(By.XPATH, "//div[starts-with(@id,'questao_') and .//input[@type='radio']]")
+    except Exception:
+        rows = []
+
+    # fallback tabela
+    if not rows:
+        try:
+            rows = driver.find_elements(By.XPATH, "//tr[.//input[@type='radio']]")
+        except Exception:
+            rows = []
+
+    out: Dict[str, WebElement] = {}
+    for row in rows:
+        try:
+            ordem_el = row.find_elements(By.XPATH, ".//*[contains(@class,'ordem')]")
+            txt = (ordem_el[0].text if ordem_el else (row.text or ""))
+            m = re.search(r"\b(\d{3})\b", txt)
+            if m:
+                out[m.group(1)] = row
+        except Exception:
+            continue
+    return out
+
+
+def _find_row_by_hint(rows: List[WebElement], hint: str) -> Optional[WebElement]:
+    hintn = _norm(hint)
+    if not hintn:
         return None
 
-    # usa só um token para não ficar rígido demais
-    token = hint.split()[0]
-    candidatos = [
-        f"//tr[contains(normalize-space(.), '{token}')]",
-        f"//*[contains(normalize-space(.), '{token}') and .//input[@type='radio']][1]",
-    ]
-    for xp in candidatos:
-        el = safe_find_element(driver, xp, timeout=1.5)
-        if el:
-            return el
-    return None
-
-
-def _pick_radio_in_row_by_label(driver, row: WebElement, resp: str) -> Optional[WebElement]:
-    """
-    Estratégia preferida: achar o input cujo label (for=ID) tem texto SIM/NAO/NA.
-    """
-    desired = _resp_norm(resp)
-
-    radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
-    for r in radios:
-        rid = (r.get_attribute("id") or "").strip()
-        if not rid:
+    for row in rows:
+        try:
+            pergunta = row.find_elements(By.XPATH, ".//*[contains(@class,'pergunta')]")
+            base_txt = pergunta[0].text if pergunta else (row.text or "")
+            if hintn in _norm(base_txt):
+                return row
+        except Exception:
             continue
-        # label associado
-        lbs = row.find_elements(By.XPATH, f".//label[@for='{rid}']")
-        for lb in lbs:
-            t = _resp_norm(lb.text or "")
-            if t == desired:
-                return r
     return None
 
 
-def _pick_radio_in_row_by_value(row: WebElement, resp: str) -> Optional[WebElement]:
-    """
-    Fallback: tenta casar pelo atributo value (varia: 'Sim', 'Não', '0/1', 'true/false', etc.)
-    """
-    desired = _resp_norm(resp)
-
-    value_map = {
-        "SIM": {"SIM", "0", "TRUE", "YES", "Y"},
-        "NAO": {"NAO", "NÃO", "1", "FALSE", "NO", "N"},
-        "NA": {"NA", "2", "N/A"},
-    }
-    wanted = value_map.get(desired, {desired})
-
-    radios = row.find_elements(By.XPATH, ".//input[@type='radio']")
-    for r in radios:
-        v = _norm(r.get_attribute("value") or "")
-        if v in wanted:
-            return r
-    return None
-
-
-def _mark_row_radio(driver, row: WebElement, resp: str) -> bool:
-    """
-    Marca uma resposta em uma row de pergunta.
-    Ordem:
-      1) por label
-      2) por value
-      3) último fallback: clicar no primeiro/segundo rádio conforme SIM/NAO/NA
-    """
-    desired = _resp_norm(resp)
-
-    def _is_enabled(radio: WebElement) -> bool:
+def _click_label_safe(driver, label_el: WebElement) -> bool:
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", label_el)
+    except Exception:
+        pass
+    try:
+        label_el.click()
+        return True
+    except Exception:
         try:
-            return radio.is_enabled()
-        except Exception:
-            return False
-
-    def _activate_radio(radio: WebElement, log_force: bool = False) -> bool:
-        try:
-            if radio.is_selected():
-                return True
-        except Exception:
-            pass
-
-        rid = (radio.get_attribute("id") or "").strip()
-        if rid:
-            labels = row.find_elements(By.XPATH, f".//label[@for='{rid}']")
-            for lb in labels:
-                if _click(driver, lb):
-                    try:
-                        if radio.is_selected():
-                            return True
-                    except Exception:
-                        return True
-
-        try:
-            if radio.is_enabled() and _click(driver, radio):
-                return True
-        except Exception:
-            pass
-
-        try:
-            res = driver.execute_script(
-                """
-                const el = arguments[0];
-                if (!el) return false;
-                const prevDisabled = el.disabled;
-                el.scrollIntoView({block: 'center', behavior: 'smooth'});
-                el.disabled = false;
-                el.checked = true;
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-                el.disabled = prevDisabled;
-                return el.checked === true;
-                """,
-                radio,
-            )
-            if log_force:
-                print(f"[INFO] Radio desabilitado: tentativa JS -> {'ok' if res else 'falha'}")
-            if res:
-                return True
-        except Exception:
-            if log_force:
-                print("[WARN] JS para radio desabilitado falhou")
-
-        try:
-            driver.execute_script("arguments[0].click();", radio)
+            driver.execute_script("arguments[0].click();", label_el)
             return True
         except Exception:
             return False
 
-    r = _pick_radio_in_row_by_label(driver, row, desired) or _pick_radio_in_row_by_value(row, desired)
-    if r:
-        return _activate_radio(r)
 
-    radios_all = row.find_elements(By.XPATH, ".//input[@type='radio']")
-    if not radios_all:
-        return False
+def _mark_row_radio_generic(driver, row: WebElement, resposta: str) -> bool:
+    """
+    Marca a resposta em um row com radios. Suporta SIM/NAO/NA.
+    Preferência: clicar no LABEL associado (Angular reage melhor).
+    """
+    desired = _resp_norm(resposta)
 
-    enabled_radios = [r for r in radios_all if _is_enabled(r)]
-    radios = enabled_radios or radios_all
+    def label_matches(txt: str) -> bool:
+        t = _resp_norm(txt)
+        if desired == "SIM":
+            return t == "SIM"
+        if desired == "NAO":
+            return t == "NAO"
+        return t == "NA"
 
-    # fallback por posição (heurístico)
+    labels = []
+    try:
+        labels = row.find_elements(By.XPATH, ".//label")
+    except Exception:
+        labels = []
+
     target = None
-    if desired == "SIM":
-        target = radios[0]
-    elif desired == "NAO":
-        target = radios[1] if len(radios) > 1 else radios[0]
-    elif desired == "NA":
-        target = radios[2] if len(radios) > 2 else radios[-1]
+    for lb in labels:
+        try:
+            if label_matches(lb.text or ""):
+                target = lb
+                break
+        except Exception:
+            continue
 
-    if target is None:
+    if not target:
         return False
 
-    return _activate_radio(target, log_force=not enabled_radios)
+    fid = (target.get_attribute("for") or "").strip()
+    if fid:
+        try:
+            inp = driver.find_element(By.ID, fid)
+            if inp.is_selected():
+                return True
+        except Exception:
+            pass
+
+    if not _click_label_safe(driver, target):
+        return False
+
+    if fid:
+        try:
+            inp = driver.find_element(By.ID, fid)
+            return bool(inp.is_selected())
+        except Exception:
+            return True
+
+    return True
+
 
 
 def _mark_apn1_radio(driver, row: WebElement, resp: str) -> bool:
@@ -327,81 +300,167 @@ def _mark_apn1_radio(driver, row: WebElement, resp: str) -> bool:
 # =============================================================================
 
 def preencher_questionario_pt(driver, plano_qpt: Dict[str, str], timeout: float) -> Dict[str, int]:
-    """
-    Marca respostas no Questionário PT conforme plano_qpt (ex.: {'Q001_ALGO': 'Não', ...})
-    """
     print("[STEP] Questionário PT...")
     goto_tab(driver, "Questionário PT", timeout)
     ensure_no_messagebox(driver, 2)
 
-    total = ok = fail = 0
+    # indexa rows por ordem
+    rows_by_ordem = _index_rows_by_ordem(driver)
 
-    for codigo_texto, resposta in (plano_qpt or {}).items():
-        total += 1
+    # lista de rows para fallback por hint
+    rows_list: List[WebElement] = []
+    try:
+        rows_list = driver.find_elements(By.XPATH, "//div[starts-with(@id,'questao_') and .//input[@type='radio']]")
+    except Exception:
+        rows_list = []
+    if not rows_list:
+        try:
+            rows_list = driver.find_elements(By.XPATH, "//tr[.//input[@type='radio']]")
+        except Exception:
+            rows_list = []
 
-        codigo = codigo_texto.split("_")[0].strip() if "_" in codigo_texto else codigo_texto.strip()
-        hint = codigo_texto.split("_", 1)[1] if "_" in codigo_texto else ""
+    # normaliza o plano para ordem -> (resp, hint, origem) com prioridade para ordem explícita "001"
+    plano_por_ordem: Dict[str, tuple[str, str, str]] = {}
+    for k, v in (plano_qpt or {}).items():
+        ordem, is_explicit, hint = _parse_key_to_ordem(k)
+        if not ordem:
+            continue
+        if is_explicit or ordem not in plano_por_ordem:
+            plano_por_ordem[ordem] = (v, hint, k)
 
-        row = _find_row_by_codigo(driver, codigo) or _find_row_by_hint_text(driver, hint)
+    total = len(plano_por_ordem)
+    ok = fail = 0
+
+    for ordem in sorted(plano_por_ordem.keys()):
+        resp, hint, origem = plano_por_ordem[ordem]
+
+        row = rows_by_ordem.get(ordem)
+        if not row and hint:
+            row = _find_row_by_hint(rows_list, hint)
+
         if not row:
-            print(f"[WARN][QPT] Não achei linha p/ '{codigo_texto}'")
+            print(f"[WARN][QPT] Não achei linha p/ ordem={ordem} (origem='{origem}', hint='{hint}')")
             fail += 1
             continue
 
         try:
             ensure_no_messagebox(driver, 1)
-            if _mark_row_radio(driver, row, resposta):
+            if _mark_row_radio_generic(driver, row, resp):
                 ok += 1
             else:
                 fail += 1
-            print(f"[INFO] QPT {codigo_texto} -> {resposta}")
+            print(f"[INFO] QPT ordem {ordem} (origem='{origem}') -> {resp}")
         except StaleElementReferenceException:
-            fail += 1
+            # reindexa e tenta 1x
+            try:
+                rows_by_ordem = _index_rows_by_ordem(driver)
+                row2 = rows_by_ordem.get(ordem)
+                if row2 and _mark_row_radio_generic(driver, row2, resp):
+                    ok += 1
+                    print(f"[INFO] QPT ordem {ordem} (retry) -> {resp}")
+                else:
+                    fail += 1
+                    print(f"[WARN][QPT] Falhou marcar ordem {ordem} (retry)")
+            except Exception:
+                fail += 1
 
-    time.sleep(0.3)
+    time.sleep(0.2)
     confirmar_etapa(driver, timeout)
     return {"total": total, "ok": ok, "fail": fail}
+
 
 
 # =============================================================================
 # EPI adicional (radios na aba EPI)
 # =============================================================================
-
 def preencher_epi_adicional(driver, plano_epi: Dict[str, str], timeout: float) -> Dict[str, int]:
     """
-    Preenche os rádios de EPI adicional necessários (Q001_CINTO etc.) na aba EPI.
+    Preenche os rádios de EPI adicional necessários na aba EPI.
+    Aceita chaves:
+      - Q001_CINTO, Q002_VENT, ...
+      - Q001, Q002, ...
+      - 001, 002, ...
     """
     print("[STEP] EPI adicional (radios)...")
     goto_tab(driver, "EPI", timeout)
     ensure_no_messagebox(driver, 2)
 
-    total = ok = fail = 0
+    # indexa rows por ordem (001..)
+    rows_by_ordem = _index_rows_by_ordem(driver)
 
-    for epi_cod, resp in (plano_epi or {}).items():
-        total += 1
-        codigo = epi_cod.split("_")[0].strip() if "_" in epi_cod else epi_cod.strip()
-        hint = epi_cod.split("_", 1)[1] if "_" in epi_cod else ""
+    # lista para fallback por hint
+    rows_list: List[WebElement] = []
+    try:
+        rows_list = driver.find_elements(By.XPATH, "//div[starts-with(@id,'questao_') and .//input[@type='radio']]")
+    except Exception:
+        rows_list = []
+    if not rows_list:
+        try:
+            rows_list = driver.find_elements(By.XPATH, "//tr[.//input[@type='radio']]")
+        except Exception:
+            rows_list = []
 
-        # tenta achar um bloco que contenha Q00X e radios
-        row = _find_row_by_codigo(driver, codigo) or _find_row_by_hint_text(driver, hint)
+    # normaliza plano para ordem -> (resp, hint, origem), prioridade para ordem explícita
+    plano_por_ordem: Dict[str, tuple[str, str, str]] = {}
+    for k, v in (plano_epi or {}).items():
+        ordem, is_explicit, hint = _parse_key_to_ordem(k)
+        if not ordem:
+            continue
+        if is_explicit or ordem not in plano_por_ordem:
+            plano_por_ordem[ordem] = (v, hint, k)
+
+    if not plano_por_ordem:
+        return {"total": 0, "ok": 0, "fail": 0}
+
+    total = len(plano_por_ordem)
+    ok = fail = 0
+
+    for ordem in sorted(plano_por_ordem.keys()):
+        resp, hint, origem = plano_por_ordem[ordem]
+
+        row = rows_by_ordem.get(ordem)
+        if not row and hint:
+            row = _find_row_by_hint(rows_list, hint)
+
         if not row:
-            print(f"[WARN][EPI_RADIO] Não achei linha p/ '{epi_cod}'")
+            print(f"[WARN][EPI_RADIO] Não achei linha p/ ordem={ordem} (origem='{origem}', hint='{hint}')")
             fail += 1
             continue
 
         try:
             ensure_no_messagebox(driver, 1)
-            if _mark_row_radio(driver, row, resp):
+
+            if _mark_row_radio_generic(driver, row, resp):
                 ok += 1
+                print(f"[INFO] EPI adicional ordem {ordem} (origem='{origem}') -> {resp}")
             else:
                 fail += 1
-            print(f"[INFO] EPI adicional {epi_cod} -> {resp}")
-        except StaleElementReferenceException:
-            fail += 1
+                print(f"[WARN][EPI_RADIO] Falhou marcar ordem {ordem} (origem='{origem}')")
 
-    time.sleep(0.3)
+        except StaleElementReferenceException:
+            # reindexa e tenta 1x
+            try:
+                rows_by_ordem = _index_rows_by_ordem(driver)
+                row2 = rows_by_ordem.get(ordem)
+                if row2 and _mark_row_radio_generic(driver, row2, resp):
+                    ok += 1
+                    print(f"[INFO] EPI adicional ordem {ordem} (retry) -> {resp}")
+                else:
+                    fail += 1
+                    print(f"[WARN][EPI_RADIO] Falhou marcar ordem {ordem} (retry)")
+            except Exception:
+                fail += 1
+                print(f"[WARN][EPI_RADIO] Falhou marcar ordem {ordem} (retry exception)")
+
+        except Exception:
+            fail += 1
+            print(f"[WARN][EPI_RADIO] Falhou marcar ordem {ordem} (exception)")
+
+    time.sleep(0.2)
     confirmar_etapa(driver, timeout)
     return {"total": total, "ok": ok, "fail": fail}
+
+
 
 
 # =============================================================================
@@ -438,7 +497,7 @@ def preencher_analise_ambiental(driver, timeout: float, resposta_padrao: str = "
     for row in rows:
         total += 1
         try:
-            if _mark_row_radio(driver, row, desired):
+            if _mark_row_radio_generic(driver, row, desired):
                 ok += 1
             else:
                 fail += 1
@@ -496,8 +555,10 @@ def preencher_apn1(driver, timeout: float, descricao: str, caracteristicas: str)
     rows = driver.find_elements(By.XPATH, "//div[starts-with(@id,'questao_') and .//input[@type='radio']]")
     if not rows:
         rows = driver.find_elements(
-            By.XPATH, "//div[contains(@class,'row') and starts-with(@id,'questao_') and .//input[@type='radio')]"
+            By.XPATH, 
+            "//div[contains(@class,'row') and starts-with(@id,'questao_') and .//input[@type='radio']]"
         )
+
 
     total = ok = fail = 0
     for idx, row in enumerate(rows, 1):

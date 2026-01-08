@@ -1,6 +1,7 @@
 # config/regras.yaml
+
 epi_radios_base:
-  # Identificador da pergunta EPI: Resposta padrão
+  # Identificador lógico -> Resposta padrão
   Q001_CINTO: "Não"
   Q002_VENT: "Não"
   Q003_COLETE: "Não"
@@ -38,19 +39,6 @@ qpt_base:
   Q013_INIBIR_SENSORES: "NA"
   Q014_OBSERVADOR: "NA"
 
-epi_radios_base:
-  Q001_CINTO: "Não"
-  Q003_COLETE: "Não"
-  Q006_PROT_FACIAL: "Não"
-
-epis_categoria_base:
-  Óculos:
-    - "ÓCULOS SEGURANÇA CONTRA IMPACTO"
-  Luvas:
-    - "LUVA VAQUETA"
-
-qpt_base:
-  Q001_MUDANCA: "Não"
 
 apn1_map:
   Q001: "tem_chama"

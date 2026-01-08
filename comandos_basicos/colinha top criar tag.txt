@@ -1,0 +1,78 @@
+
+
+1) Conferir se está tudo pronto para salvar:
+
+git status
+
+
+2) Salvar uma versão funcional (commit):
+
+git add .
+git commit -m "DEFINITIVO5"
+
+
+3) Criar a TAG (save point):
+
+git tag -a v2026-01-06-0400html-ok -m "DEFINITIVO5"
+
+
+
+4) Enviar para o GitHub:
+
+git push origin main
+git push origin v2026-01-06-0400html-ok
+
+Conferir qual tag está “em cima” do código atual:
+
+git describe --tags
+
+
+Depois de fazer merge no GitHub - puxar para o VS Code/PC
+Sempre que você fizer merge no GitHub e quiser trazer para o PC:
+
+git checkout main
+git pull origin main
+
+Restaurar uma versão salva (tag)
+Ver código exatamente como estava na tag:
+
+git checkout v2025-12-31-0000html-ok
+
+Voltar o main para a tag (quando você trabalha sozinho):
+
+git checkout main
+git reset --hard v2025-12-29-2100html-ok
+git push origin main --force
+
+
+3. Procedimento COMPLETO e CORRETO (copiar e colar)
+
+Se o objetivo é:
+
+“Quero que o main fique exatamente igual ao que estava salvo na tag, sem sobrar nada.”
+
+Faça assim:
+
+# 1. Garantir que você está na main
+git checkout main
+
+# 2. Resetar a main exatamente para a tag
+git reset --hard v2025-12-31-0000html-ok
+
+# 3. (Opcional, mas recomendado) remover arquivos não versionados
+git clean -fd
+
+# 4. Conferir
+git status
+git log --oneline -1
+
+# 5. Forçar o push (você trabalha sozinho)
+git push origin main --force
+
+git checkout main
+
+
+
+Empacotar 
+
+pyinstaller --noconfirm --clean --onefile --noconsole --name lite2 --add-data "audioss;audioss" --collect-all pygame --collect-all requests lite2.py

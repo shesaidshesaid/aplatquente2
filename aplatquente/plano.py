@@ -112,6 +112,43 @@ def normalizar_texto(s: str) -> str:
     return s
 
 
+
+
+# =============================================================================
+# EPI Radios: aliases e conversão para "ordem" (001..006)
+# =============================================================================
+
+EPI_RADIO_KEY_TO_ORDEM: Dict[str, str] = {
+    "Q001_CINTO": "001",
+    "Q002_VENT": "002",
+    "Q003_COLETE": "003",
+    "Q004_ILUM": "004",
+    "Q005_DPA": "005",
+    "Q006_PROT_FACIAL": "006",
+}
+
+def _norm_simnao(v: str) -> str:
+    v = (v or "").strip().lower()
+    return "Sim" if v in ("sim", "s", "yes", "y", "true", "1") else "Não"
+
+def epi_radios_para_ordem(d: Mapping[str, str]) -> Dict[str, str]:
+    """
+    Converte dict com chaves Qxxx_* e/ou '001'..'999' para dict somente por ordem '001'.. .
+    """
+    out: Dict[str, str] = {}
+    for k, v in (d or {}).items():
+        kk = (k or "").strip()
+        vv = _norm_simnao(v)
+        if re.fullmatch(r"\d{3}", kk):
+            out[kk] = vv
+            continue
+        if kk in EPI_RADIO_KEY_TO_ORDEM:
+            out[EPI_RADIO_KEY_TO_ORDEM[kk]] = vv
+            continue
+    return out
+
+
+
 # =============================================================================
 # Coleta descrição / características
 # =============================================================================
@@ -277,19 +314,24 @@ def ajustar_base_qpt(ctx: Dict[str, Any], qpt_base: Mapping[str, str]) -> Dict[s
 def ajustar_base_epi_radios(ctx: Dict[str, Any], epi_radios_base: Mapping[str, str]) -> Dict[str, str]:
     base = dict(epi_radios_base)
 
-    def set_if_present(key: str, val: str) -> None:
-        if key in base:
-            base[key] = val
+    # garante presença das chaves lógicas (mesmo se YAML vier incompleto)
+    for k in EPI_RADIO_KEY_TO_ORDEM.keys():
+        base.setdefault(k, "Não")
+
+    def set_val(key: str, val: str) -> None:
+        # aqui você mantém a saída "lógica" por Qxxx_
+        base[key] = val
 
     tem_altura = bool(ctx.get("tem_altura") or ctx.get("tem_acesso_cordas") or ctx.get("tem_sobre_o_mar"))
     tem_sobre_mar = bool(ctx.get("tem_sobre_o_mar"))
     hazard_olhos = bool(ctx.get("hazard_olhos"))
 
-    set_if_present("Q001_CINTO", "Sim" if tem_altura else "Não")
-    set_if_present("Q003_COLETE", "Sim" if tem_sobre_mar else "Não")
-    set_if_present("Q006_PROT_FACIAL", "Sim" if hazard_olhos else "Não")
+    set_val("Q001_CINTO", "Sim" if tem_altura else "Não")
+    set_val("Q003_COLETE", "Sim" if tem_sobre_mar else "Não")
+    set_val("Q006_PROT_FACIAL", "Sim" if hazard_olhos else "Não")
 
     return base
+
 
 
 def ajustar_base_epis_categoria(ctx: Dict[str, Any], epis_categoria_base: Mapping[str, List[str]]) -> Dict[str, List[str]]:
@@ -501,6 +543,9 @@ def gerar_plano_trabalho_quente(driver: Driver, timeout: float, regras_path: Opt
     apn1_itens = coletar_apn1_itens(driver, timeout)
     apn1_itens = decidir_respostas_apn1(ctx, apn1_itens, regras.get("apn1_regras", {}))
 
+    epi_radios = ajustar_base_epi_radios(ctx, regras["epi_radios_base"])
+    epi_radios_ordem = epi_radios_para_ordem(epi_radios)
+
     apn1_por_ordem: Dict[str, str] = {}
     for it in apn1_itens:
         ordem = (it.get("ordem") or "").strip()
@@ -508,6 +553,8 @@ def gerar_plano_trabalho_quente(driver: Driver, timeout: float, regras_path: Opt
             apn1_por_ordem[ordem] = it.get("resposta_planejada", "Não")
 
     return {
+        "epi_radios": epi_radios,
+        "epi_radios_ordem": epi_radios_ordem,
         "regras_path": regras["regras_path"],
         "descricao": descricao,
         "caracteristicas": caracteristicas,
@@ -575,12 +622,16 @@ def aplicar_plano(driver, plano: Dict[str, Any], timeout: float) -> Dict[str, An
 
     # 3) EPI adicional (radios)
     try:
-        epi_rad = plano.get("epi_radios", {}) or plano.get("epi_adicional", {}) or {}
-        if epi_rad:
-            resultado["epi_radios"] = preencher_epi_adicional(driver, epi_rad, timeout)
+        epi_rad_raw = plano.get("epi_radios", {}) or plano.get("epi_adicional", {}) or {}
+        if epi_rad_raw:
+            epi_rad_payload = dict(epi_rad_raw)
+            epi_rad_payload.update(plano.get("epi_radios_ordem", {}) or epi_radios_para_ordem(epi_rad_raw))
+
+            resultado["epi_radios"] = preencher_epi_adicional(driver, epi_rad_payload, timeout)
             _confirmar("EPI adicional")
     except Exception as e:
         resultado["warnings"].append(f"EPI adicional não aplicado: {e}")
+
 
     # 4) EPIs por categoria
     try:
@@ -620,9 +671,14 @@ def imprimir_plano(plano: Dict[str, Any]) -> None:
             continue
         print(f"  - {k}: {ctx[k]}")
 
-    print("\nEPI Adicional (radios):")
+    print("\nEPI Adicional (radios) [chaves lógicas]:")
     for k, v in (plano.get("epi_radios", {}) or {}).items():
         print(f"  - {k}: {v}")
+
+    print("\nEPI Adicional (radios) [por ordem]:")
+    for k, v in (plano.get("epi_radios_ordem", {}) or {}).items():
+        print(f"  - {k}: {v}")
+
 
     print("\nAPN-1 (dinâmica):")
     itens = plano.get("apn1_itens", []) or []

@@ -1,0 +1,26 @@
+python -m pip install --upgrade pip setuptools wheel
+
+
+python -m pip install --upgrade packaging
+
+
+python -m pip install --upgrade selenium PyYAML keyring
+
+
+python -m pip install --upgrade webdriver-manager python-dotenv
+
+
+python -c "import selenium, yaml, keyring; print('OK:', selenium.__version__)"
+
+
+keyring:
+python -m keyring set aplat.petrobras d9j8
+
+conferir tamanho da senha se salvou
+python -c "import keyring; s=keyring.get_password('aplat.petrobras','d9j8'); print('OK len=' + str(len(s)) if s else 'NAO ENCONTRADO')"
+
+
+
+
+
+
